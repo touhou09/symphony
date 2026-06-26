@@ -48,6 +48,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:kind, :string)
       field(:endpoint, :string, default: "https://api.linear.app/graphql")
       field(:api_key, :string)
+      field(:email, :string)
       field(:project_slug, :string)
       field(:assignee, :string)
       field(:required_labels, {:array, :string}, default: [])
@@ -60,7 +61,7 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :required_labels, :active_states, :terminal_states],
+        [:kind, :endpoint, :api_key, :email, :project_slug, :assignee, :required_labels, :active_states, :terminal_states],
         empty_values: []
       )
       |> update_change(:required_labels, fn labels ->
@@ -372,11 +373,7 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp finalize_settings(settings) do
-    tracker = %{
-      settings.tracker
-      | api_key: resolve_secret_setting(settings.tracker.api_key, System.get_env("LINEAR_API_KEY")),
-        assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE"))
-    }
+    tracker = finalize_tracker(settings.tracker)
 
     workspace = %{
       settings.workspace
@@ -390,6 +387,23 @@ defmodule SymphonyElixir.Config.Schema do
     }
 
     %{settings | tracker: tracker, workspace: workspace, codex: codex}
+  end
+
+  defp finalize_tracker(%{kind: "jira"} = tracker) do
+    %{
+      tracker
+      | api_key: resolve_secret_setting(tracker.api_key, System.get_env("JIRA_API_TOKEN")),
+        email: resolve_secret_setting(tracker.email, System.get_env("JIRA_EMAIL")),
+        assignee: resolve_secret_setting(tracker.assignee, System.get_env("JIRA_ASSIGNEE"))
+    }
+  end
+
+  defp finalize_tracker(tracker) do
+    %{
+      tracker
+      | api_key: resolve_secret_setting(tracker.api_key, System.get_env("LINEAR_API_KEY")),
+        assignee: resolve_secret_setting(tracker.assignee, System.get_env("LINEAR_ASSIGNEE"))
+    }
   end
 
   defp normalize_keys(value) when is_map(value) do
