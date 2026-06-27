@@ -104,6 +104,43 @@ tracker:
 `JIRA_ENDPOINT` should be the Jira Cloud site URL such as `https://your-site.atlassian.net`.
 `JIRA_API_TOKEN` is used with `JIRA_EMAIL` via Jira Cloud Basic auth.
 
+## Guarded main-to-Compose CD workflow
+
+This repository also provides a guarded deploy workflow that rebuilds only the `orchestrator`
+service from the tested `main` branch checkout on the runtime host:
+
+- `.github/workflows/deploy-compose-main.yml`
+
+Trigger matrix:
+- `main` branch pushes (subject to protected environment approval).
+- `workflow_dispatch` with `confirm_deploy` input equal to `I_APPROVE_DEPLOY`.
+
+Guarding:
+- Job requires `symphony-compose` environment approval.
+- Deployment exits early if required secrets are missing:
+  - `DEPLOY_HOST`
+  - `DEPLOY_USER`
+  - `DEPLOY_TARGET_PATH`
+  - `DEPLOY_SSH_KEY`
+- The manual dispatch path requires explicit confirmation input and a valid environment.
+
+Runtime contract:
+- The workflow deploys from `main` by checking out `main` on the remote host, resetting to
+  `origin/main`, and then running `docker compose up -d --build --no-deps orchestrator`.
+- Ticket workspaces and `Symphony` PR behavior remain unchanged; compose-time workspace clones still
+  come from the `SYMPHONY_SOURCE_BRANCH` configured in `WORKFLOW.md` (default `dev`) unless the runtime
+  environment overrides it.
+- To keep ticket workspaces on `dev` while runtime code is `main`, leave `SYMPHONY_SOURCE_BRANCH`
+  unset or set to `dev` in the deployment environment.
+
+Rollback/manual recovery:
+- Inspect container state: `docker compose ps -a orchestrator`
+- Roll back to prior image/container state by redeploying the same service from the previous git revision,
+  or rebuild from a known-good branch:
+  `git -C <repo> checkout <good_sha_or_branch> && docker compose up -d --build --no-deps orchestrator`
+- If the deploy path becomes unavailable, recover by SSH-ing to the target host and running:
+  `cd <repo> && docker compose down --remove-orphans && docker compose up -d --build --no-deps orchestrator`
+
 ## Codex squad mode
 
 `agent.model_roles` describes the Codex model split used by squad mode:
