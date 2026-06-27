@@ -139,3 +139,11 @@
 - **Impact**: New unattended workspaces and completion PRs now target the fork's `dev` branch by default instead of the deleted feature branch; PR #4 merged the dev lane into `main`.
 - **Test**: Branch listing confirmed only `origin/main` and `origin/dev` on the fork; `mix format` and targeted ExUnit 65/65 passed; Docker build/up succeeded; container env reports `touhou09/symphony`, `dev`, and PR base `dev`.
 ---
+
+## 2026-06-27: SYM-12 CI/CD E2E smoke [blocked]
+- **What**: Created SYM-12 for CI checks plus merge-triggered CD and let the live Symphony orchestrator dispatch it from Jira.
+- **Why**: Verify the new `dev`-based Symphony flow with a realistic ticket that should produce a branch, PR, and review handoff.
+- **Impact**: Intake, Jira state transition, workspace clone from `touhou09/symphony@dev`, and CTO evidence generation worked; implementation-to-PR handoff did not complete.
+- **Test**: Ticket preflight passed in both skill and repo checkers; SYM-12 reached `진행 중`, created `/var/lib/symphony/workspaces/SYM-12`, but only produced `docs/codex-squad-evidence.md` and no PR before the run was stopped at about 597,500 tokens.
+- **Trap**: `codex.max_no_diff_tokens` was disabled for the `dev` deployment, so evidence-only progress bypassed the previous no-diff stop; SYM-12 was commented with the smoke result and moved to `취소` to prevent redispatch.
+---
