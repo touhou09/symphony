@@ -10,7 +10,7 @@
   - Keep `hooks.after_create` tolerant of absent `mise`; it already checks `command -v mise` before using it.
   - Add or update regression coverage showing default completion/remove hooks do not reference unconditional `mise exec`.
   - Add or update hook execution/failure reporting coverage if existing tests do not already prove real hook failures are logged and ignored/surfaced appropriately.
-  - Run a local or Compose smoke that exercises `after_complete` and `before_remove` without `mise` and captures sanitized output showing no `mise: not found` / status `127`.
+  - Run a local or Compose smoke that exercises `after_complete` and `before_remove` without `mise` and captures sanitized output showing no `mise: not found` or status `127`.
 - Out of scope:
   - Jira credentials, GitHub tokens, deploy secrets, and unrelated squad workflow changes.
   - Broad refactors of hook execution, PR publishing, or workspace cleanup behavior beyond this dependency fix.
@@ -79,4 +79,13 @@
   - `mix format --check-formatted`: pass.
   - `mix specs.check`: pass (`specs.check: all public functions have @spec or exemption`).
   - No-`mise` smoke: `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin sh -lc ...` returned `HOOK_SMOKE_MISE=MISSINPATH`, showed `after_complete` / `before_remove` use direct `mix workspace.*` commands, and emitted no `mise: not found`.
-- [x] final_verifier (gpt-5.5): PASS - required validation passed, evidence contains verifier and final_verifier PASS rows, and residual risk is limited to the existing environment-sensitive test harness concurrency noted above.
+- Post-merge final verifier validation:
+  - Merged `origin/dev` into `sym-15-compose-hook-mise-runtime`; resolved the add/add evidence conflict by keeping the SYM-15 evidence.
+  - `ERL_FLAGS="+S 1" mix test test/symphony_elixir/core_test.exs test/symphony_elixir/workspace_and_config_test.exs --max-cases 1 --max-failures 1`: pass (`103 tests, 0 failures`).
+  - `mix format --check-formatted`: pass.
+  - `mix specs.check`: pass (`specs.check: all public functions have @spec or exemption`).
+  - `mix squad.check --file ../docs/codex-squad-evidence.md --workflow WORKFLOW.md`: pass (`squad.check: evidence contract OK`).
+  - No-`mise` smoke with restricted PATH returned `HOOK_SMOKE_MISE=MISSINPATH`, showed direct `mix workspace.*` hook commands, and emitted no `mise: not found`.
+  - `make -C elixir all`: fail because the shell used a non-dev Mix environment where `mix credo` is unavailable.
+  - `MIX_ENV=dev make -C elixir all`: setup, build, format, lint, and squad-check passed; coverage failed on pre-existing/unrelated full-suite issues (`lazy_html` unavailable in dev coverage LiveView tests and a retry-backoff timing assertion).
+- [x] final_verifier (gpt-5.5): PASS - required SYM-15 validation passed, evidence contains verifier and final_verifier PASS rows, and residual risk is limited to existing environment-sensitive/full-suite issues outside the hook dependency change.

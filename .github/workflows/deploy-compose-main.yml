@@ -1,0 +1,94 @@
+name: Deploy orchestrator from main to compose
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      confirm_deploy:
+        description: Type `I_APPROVE_DEPLOY` to confirm manual deployment
+        required: true
+        default: ""
+
+jobs:
+  deploy-orchestrator:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.confirm_deploy == 'I_APPROVE_DEPLOY' }}
+    environment: symphony-compose
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Validate deploy secrets and inputs
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_TARGET_PATH: ${{ secrets.DEPLOY_TARGET_PATH }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_PORT: ${{ vars.DEPLOY_SSH_PORT }}
+        run: |
+          set -eu
+          missing=()
+
+          if [ -z "${DEPLOY_HOST}" ]; then
+            missing+=("DEPLOY_HOST")
+          fi
+          if [ -z "${DEPLOY_USER}" ]; then
+            missing+=("DEPLOY_USER")
+          fi
+          if [ -z "${DEPLOY_TARGET_PATH}" ]; then
+            missing+=("DEPLOY_TARGET_PATH")
+          fi
+          if [ -z "${DEPLOY_SSH_KEY}" ]; then
+            missing+=("DEPLOY_SSH_KEY")
+          fi
+
+          if [ "${#missing[@]}" -ne 0 ]; then
+            printf 'Missing required deploy secrets: %s\n' "${missing[*]}"
+            exit 1
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.confirm_deploy }}" != "I_APPROVE_DEPLOY" ]; then
+            echo "workflow_dispatch requires confirm_deploy==I_APPROVE_DEPLOY"
+            exit 1
+          fi
+
+      - name: Configure SSH for deploy host
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Add deploy host key
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_PORT: ${{ vars.DEPLOY_SSH_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          port="${DEPLOY_SSH_PORT:-22}"
+          ssh-keyscan -p "${port}" "${DEPLOY_HOST}" >> ~/.ssh/known_hosts
+
+      - name: Update runtime from main and deploy orchestrator only
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_TARGET_PATH: ${{ secrets.DEPLOY_TARGET_PATH }}
+          DEPLOY_SSH_PORT: ${{ vars.DEPLOY_SSH_PORT }}
+        run: |
+          port="${DEPLOY_SSH_PORT:-22}"
+          ssh -o BatchMode=yes -p "${port}" "${DEPLOY_USER}@${DEPLOY_HOST}" <<SSH
+            set -eu
+            target_path="${DEPLOY_TARGET_PATH}"
+
+            if [ ! -d "${target_path}/.git" ]; then
+              echo "Deployment path missing a git checkout: ${target_path}"
+              exit 1
+            fi
+
+            cd "${target_path}"
+            git fetch --prune origin
+            git checkout main
+            git reset --hard origin/main
+            docker compose up -d --build --no-deps orchestrator
+          SSH
