@@ -303,6 +303,8 @@ defmodule SymphonyElixir.Config.Schema do
     import Ecto.Changeset
 
     @primary_key false
+    @hook_fields [:after_create, :before_run, :after_run, :after_complete, :before_remove, :timeout_ms]
+
     embedded_schema do
       field(:after_create, :string)
       field(:before_run, :string)
@@ -315,7 +317,7 @@ defmodule SymphonyElixir.Config.Schema do
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:after_create, :before_run, :after_run, :after_complete, :before_remove, :timeout_ms], empty_values: [])
+      |> cast(attrs, @hook_fields, empty_values: [])
       |> validate_number(:timeout_ms, greater_than: 0)
     end
   end
@@ -502,14 +504,14 @@ defmodule SymphonyElixir.Config.Schema do
         |> get_field(roles_field, %{})
         |> normalize_model_roles()
 
-      Enum.flat_map(verifiers, fn verifier ->
-        if Map.has_key?(roles, verifier) do
-          []
-        else
-          [{verifiers_field, "verifier #{inspect(verifier)} must exist in model_roles"}]
-        end
-      end)
+      verifiers
+      |> Enum.reject(&Map.has_key?(roles, &1))
+      |> Enum.map(&missing_required_verifier_error(&1, verifiers_field))
     end)
+  end
+
+  defp missing_required_verifier_error(verifier, verifiers_field) do
+    {verifiers_field, "verifier #{inspect(verifier)} must exist in model_roles"}
   end
 
   defp changeset(attrs) do

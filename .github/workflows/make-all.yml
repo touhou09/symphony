@@ -1,10 +1,12 @@
 name: make-all
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches:
       - main
+      - dev
 
 jobs:
   make-all:

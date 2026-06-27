@@ -141,33 +141,40 @@ defmodule SymphonyElixir.Config do
   end
 
   defp validate_semantics(settings) do
+    settings
+    |> semantic_checks()
+    |> Enum.find(&(&1 != :ok))
+    |> case do
+      nil -> :ok
+      error -> error
+    end
+  end
+
+  defp semantic_checks(settings) do
+    [
+      tracker_kind_check(settings),
+      tracker_required_field_check(settings, "linear", :api_key, :missing_linear_api_token),
+      tracker_required_field_check(settings, "linear", :project_slug, :missing_linear_project_slug),
+      tracker_required_field_check(settings, "jira", :endpoint, :missing_jira_endpoint),
+      tracker_required_field_check(settings, "jira", :api_key, :missing_jira_api_token),
+      tracker_required_field_check(settings, "jira", :email, :missing_jira_email),
+      tracker_required_field_check(settings, "jira", :project_slug, :missing_jira_project_key)
+    ]
+  end
+
+  defp tracker_kind_check(settings) do
     cond do
-      is_nil(settings.tracker.kind) ->
-        {:error, :missing_tracker_kind}
+      is_nil(settings.tracker.kind) -> {:error, :missing_tracker_kind}
+      settings.tracker.kind not in ["linear", "memory", "jira"] -> {:error, {:unsupported_tracker_kind, settings.tracker.kind}}
+      true -> :ok
+    end
+  end
 
-      settings.tracker.kind not in ["linear", "memory", "jira"] ->
-        {:error, {:unsupported_tracker_kind, settings.tracker.kind}}
-
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
-        {:error, :missing_linear_api_token}
-
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
-        {:error, :missing_linear_project_slug}
-
-      settings.tracker.kind == "jira" and not is_binary(settings.tracker.endpoint) ->
-        {:error, :missing_jira_endpoint}
-
-      settings.tracker.kind == "jira" and not is_binary(settings.tracker.api_key) ->
-        {:error, :missing_jira_api_token}
-
-      settings.tracker.kind == "jira" and not is_binary(settings.tracker.email) ->
-        {:error, :missing_jira_email}
-
-      settings.tracker.kind == "jira" and not is_binary(settings.tracker.project_slug) ->
-        {:error, :missing_jira_project_key}
-
-      true ->
-        :ok
+  defp tracker_required_field_check(settings, kind, field, reason) do
+    if settings.tracker.kind == kind and not is_binary(Map.get(settings.tracker, field)) do
+      {:error, reason}
+    else
+      :ok
     end
   end
 

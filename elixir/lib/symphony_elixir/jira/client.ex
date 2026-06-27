@@ -79,15 +79,19 @@ defmodule SymphonyElixir.Jira.Client do
   @spec transition_issue(String.t(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
   def transition_issue(issue_id, transition_id, opts \\ [])
       when is_binary(issue_id) and is_binary(transition_id) do
-    request(:post, "/rest/api/3/issue/#{issue_id}/transitions", %{"transition" => %{"id" => transition_id}}, opts)
+    request(
+      :post,
+      "/rest/api/3/issue/#{issue_id}/transitions",
+      %{"transition" => %{"id" => transition_id}},
+      opts
+    )
   end
 
   @spec list_comments(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def list_comments(issue_id, opts \\ []) when is_binary(issue_id) do
-    with {:ok, response} <-
-           request(:get, "/rest/api/3/issue/#{issue_id}/comment?maxResults=100&orderBy=created", nil, opts),
-         {:ok, comments} <- decode_comments(response) do
-      {:ok, comments}
+    case request(:get, "/rest/api/3/issue/#{issue_id}/comment?maxResults=100&orderBy=created", nil, opts) do
+      {:ok, response} -> decode_comments(response)
+      {:error, _reason} = error -> error
     end
   end
 
@@ -132,10 +136,11 @@ defmodule SymphonyElixir.Jira.Client do
         "id IN (#{Enum.join(numeric_ids, ",")})"
 
       {[], issue_keys} ->
-        "key IN (#{issue_keys |> Enum.map(&jql_string/1) |> Enum.join(",")})"
+        "key IN (#{Enum.map_join(issue_keys, ",", &jql_string/1)})"
 
       {numeric_ids, issue_keys} ->
-        "(id IN (#{Enum.join(numeric_ids, ",")}) OR key IN (#{issue_keys |> Enum.map(&jql_string/1) |> Enum.join(",")}))"
+        key_clause = Enum.map_join(issue_keys, ",", &jql_string/1)
+        "(id IN (#{Enum.join(numeric_ids, ",")}) OR key IN (#{key_clause}))"
     end
   end
 
@@ -149,7 +154,7 @@ defmodule SymphonyElixir.Jira.Client do
   defp project_clause(project_key), do: ~s(project = "#{project_key}")
 
   defp status_clause(states) do
-    values = states |> Enum.map(&jql_status_value/1) |> Enum.join(",")
+    values = Enum.map_join(states, ",", &jql_status_value/1)
     "status IN (#{values})"
   end
 
@@ -158,9 +163,14 @@ defmodule SymphonyElixir.Jira.Client do
 
   defp status_filters_for_states(state_names, tracker) do
     cond do
-      same_states?(state_names, tracker.terminal_states) and tracker.terminal_status_ids != [] -> tracker.terminal_status_ids
-      same_states?(state_names, tracker.active_states) and tracker.active_status_ids != [] -> tracker.active_status_ids
-      true -> state_names
+      same_states?(state_names, tracker.terminal_states) and tracker.terminal_status_ids != [] ->
+        tracker.terminal_status_ids
+
+      same_states?(state_names, tracker.active_states) and tracker.active_status_ids != [] ->
+        tracker.active_status_ids
+
+      true ->
+        state_names
     end
   end
 
@@ -416,13 +426,17 @@ defmodule SymphonyElixir.Jira.Client do
     Enum.find_value(names, fn name ->
       case env.(name) do
         value when is_binary(value) ->
-          value = String.trim(value)
-          if value == "", do: nil, else: value
+          non_empty_trimmed(value)
 
         _ ->
           nil
       end
     end)
+  end
+
+  defp non_empty_trimmed(value) do
+    value = String.trim(value)
+    if value == "", do: nil, else: value
   end
 
   defp parse_proxy(nil), do: nil

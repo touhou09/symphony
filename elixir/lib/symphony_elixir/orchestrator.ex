@@ -625,28 +625,28 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_no_diff_running_issues(%State{} = state) do
-    Enum.reduce(state.running, state, fn {issue_id, running_entry}, state_acc ->
-      if Map.has_key?(state_acc.blocked, issue_id) do
-        state_acc
-      else
-        case no_diff_token_limit_error(running_entry) do
-          nil ->
-            state_acc
+    Enum.reduce(state.running, state, &reconcile_no_diff_running_issue/2)
+  end
 
-          error ->
-            identifier = Map.get(running_entry, :identifier, issue_id)
-            session_id = running_entry_session_id(running_entry)
+  defp reconcile_no_diff_running_issue({issue_id, running_entry}, %State{} = state) do
+    cond do
+      Map.has_key?(state.blocked, issue_id) -> state
+      is_nil(no_diff_token_limit_error(running_entry)) -> state
+      true -> block_no_diff_running_issue(state, issue_id, running_entry)
+    end
+  end
 
-            Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id}; #{error}")
+  defp block_no_diff_running_issue(%State{} = state, issue_id, running_entry) do
+    error = no_diff_token_limit_error(running_entry)
+    identifier = Map.get(running_entry, :identifier, issue_id)
+    session_id = running_entry_session_id(running_entry)
 
-            post_runtime_blocker_comment(issue_id, running_entry, error)
+    Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id}; #{error}")
+    post_runtime_blocker_comment(issue_id, running_entry, error)
 
-            state_acc
-            |> record_session_completion_totals(running_entry)
-            |> stop_and_block_issue(issue_id, running_entry, error)
-        end
-      end
-    end)
+    state
+    |> record_session_completion_totals(running_entry)
+    |> stop_and_block_issue(issue_id, running_entry, error)
   end
 
   defp reconcile_stalled_running_issues(%State{} = state) do
@@ -1161,10 +1161,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
 
   defp preflight_issue_for_dispatch(%Issue{} = issue) do
-    with :ok <- ticket_preflight_issue(issue),
-         :ok <- runtime_blocker_preflight(issue) do
-      :ok
-    end
+    with :ok <- ticket_preflight_issue(issue), do: runtime_blocker_preflight(issue)
   end
 
   defp ticket_preflight_issue(%Issue{} = issue) do
@@ -1178,25 +1175,31 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp runtime_blocker_preflight(%Issue{id: issue_id}) when is_binary(issue_id) do
-    if Config.settings!().codex.max_no_diff_tokens > 0 do
-      case Tracker.list_comments(issue_id) do
-        {:ok, comments} ->
-          if Enum.any?(comments, &(comment_body(&1) |> String.contains?(@runtime_blocker_marker))) do
-            {:error, {:runtime_blocker, "runtime blocker persisted on tracker workpad: no-diff token limit"}}
-          else
-            :ok
-          end
+    if Config.settings!().codex.max_no_diff_tokens > 0,
+      do: inspect_runtime_blocker_comments(issue_id),
+      else: :ok
+  end
 
-        {:error, reason} ->
-          Logger.debug("Unable to inspect runtime blocker comments for issue_id=#{issue_id}: #{inspect(reason)}")
-          :ok
-      end
+  defp runtime_blocker_preflight(_issue), do: :ok
+
+  defp inspect_runtime_blocker_comments(issue_id) do
+    case Tracker.list_comments(issue_id) do
+      {:ok, comments} ->
+        runtime_blocker_comment_result(comments)
+
+      {:error, reason} ->
+        Logger.debug("Unable to inspect runtime blocker comments for issue_id=#{issue_id}: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp runtime_blocker_comment_result(comments) do
+    if Enum.any?(comments, &(comment_body(&1) |> String.contains?(@runtime_blocker_marker))) do
+      {:error, {:runtime_blocker, "runtime blocker persisted on tracker workpad: no-diff token limit"}}
     else
       :ok
     end
   end
-
-  defp runtime_blocker_preflight(_issue), do: :ok
 
   defp block_issue_before_dispatch(state, issue, errors, opts \\ [])
 

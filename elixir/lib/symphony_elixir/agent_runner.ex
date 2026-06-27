@@ -5,8 +5,8 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.Squad.EvidenceCheck
   alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.Squad.EvidenceCheck
 
   @type worker_host :: String.t() | nil
 
@@ -133,56 +133,76 @@ defmodule SymphonyElixir.AgentRunner do
 
     roles
     |> Enum.with_index(1)
-    |> Enum.reduce_while(:ok, fn {{role, model}, role_number}, :ok ->
-      prompt = build_squad_role_prompt(issue, opts, role, model, role_number, total_roles)
-      command = codex_command_for_model(settings.codex.command, model)
-      implementer_before_change_state = if role == "implementer", do: workspace_change_state(workspace), else: :skip
-
-      case AppServer.start_session(workspace, worker_host: worker_host, codex_command: command) do
-        {:ok, session} ->
-          try do
-            case AppServer.run_turn(
-                   session,
-                   prompt,
-                   issue,
-                   on_message: codex_message_handler(codex_update_recipient, issue)
-                 ) do
-              {:ok, turn_session} ->
-                role_progress_result =
-                  if role == "implementer" do
-                    verify_implementer_turn_progress(implementer_before_change_state, workspace)
-                  else
-                    :ok
-                  end
-
-                case role_progress_result do
-                  :ok ->
-                    Logger.info(
-                      "Completed squad role for #{issue_context(issue)} role=#{role} model=#{model} session_id=#{turn_session[:session_id]} workspace=#{workspace} role_turn=#{role_number}/#{total_roles}"
-                    )
-
-                    {:cont, :ok}
-
-                  {:error, reason} ->
-                    Logger.warning("Implementer role blocked early for #{issue_context(issue)}: #{reason}")
-                    {:halt, {:error, {:runtime_blocker, reason}}}
-                end
-
-              {:error, reason} ->
-                {:halt, {:error, {:squad_role_failed, role, reason}}}
-            end
-          after
-            AppServer.stop_session(session)
-          end
-
-        {:error, reason} ->
-          {:halt, {:error, {:squad_role_start_failed, role, reason}}}
-      end
+    |> Enum.reduce_while(:ok, fn role_entry, :ok ->
+      run_squad_role(role_entry, settings, workspace, issue, codex_update_recipient, opts, {worker_host, total_roles})
     end)
     |> case do
       :ok -> validate_squad_evidence(workspace)
       {:error, _reason} = error -> error
     end
+  end
+
+  defp run_squad_role({{role, model}, role_number}, settings, workspace, issue, recipient, opts, {worker_host, total_roles}) do
+    prompt = build_squad_role_prompt(issue, opts, role, model, role_number, total_roles)
+    command = codex_command_for_model(settings.codex.command, model)
+    pre_state = role_pre_change_state(role, workspace)
+    role_context = {role, model, role_number, total_roles, prompt}
+
+    case AppServer.start_session(workspace, worker_host: worker_host, codex_command: command) do
+      {:ok, session} ->
+        run_started_squad_role(session, role_context, pre_state, workspace, issue, recipient)
+
+      {:error, reason} ->
+        {:halt, {:error, {:squad_role_start_failed, role, reason}}}
+    end
+  end
+
+  defp run_started_squad_role(session, role_context, pre_state, workspace, issue, recipient) do
+    {_role, _model, _role_number, _total_roles, prompt} = role_context
+
+    try do
+      session
+      |> AppServer.run_turn(prompt, issue, on_message: codex_message_handler(recipient, issue))
+      |> handle_squad_role_result(role_context, pre_state, workspace, issue)
+    after
+      AppServer.stop_session(session)
+    end
+  end
+
+  defp handle_squad_role_result({:ok, turn_session}, role_context, pre_state, workspace, issue) do
+    {role, model, role_number, total_roles, _prompt} = role_context
+
+    case verify_role_progress(role, pre_state, workspace) do
+      :ok ->
+        log_squad_role_complete(issue, role, model, turn_session, workspace, role_number, total_roles)
+        {:cont, :ok}
+
+      {:error, reason} ->
+        Logger.warning("Implementer role blocked early for #{issue_context(issue)}: #{reason}")
+        {:halt, {:error, {:runtime_blocker, reason}}}
+    end
+  end
+
+  defp handle_squad_role_result({:error, reason}, role_context, _pre_state, _workspace, _issue) do
+    {role, _model, _role_number, _total_roles, _prompt} = role_context
+
+    {:halt, {:error, {:squad_role_failed, role, reason}}}
+  end
+
+  defp role_pre_change_state("implementer", workspace), do: workspace_change_state(workspace)
+  defp role_pre_change_state(_role, _workspace), do: :skip
+
+  defp verify_role_progress("implementer", pre_state, workspace) do
+    verify_implementer_turn_progress(pre_state, workspace)
+  end
+
+  defp verify_role_progress(_role, _pre_state, _workspace), do: :ok
+
+  defp log_squad_role_complete(issue, role, model, turn_session, workspace, role_number, total_roles) do
+    Logger.info(
+      "Completed squad role for #{issue_context(issue)} role=#{role} model=#{model} " <>
+        "session_id=#{turn_session[:session_id]} workspace=#{workspace} role_turn=#{role_number}/#{total_roles}"
+    )
   end
 
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
@@ -351,8 +371,6 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp workspace_entry_signature(_path), do: :unknown
-
   defp file_content_signature(path) do
     case File.read(path) do
       {:ok, contents} -> {:sha256, :crypto.hash(:sha256, contents)}
@@ -361,9 +379,11 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   @doc false
+  @spec workspace_change_state_for_test(Path.t()) :: map() | :unknown
   def workspace_change_state_for_test(path), do: workspace_change_state(path)
 
   @doc false
+  @spec implements_scoped_workspace_progress_for_test(map() | term(), map() | term()) :: boolean()
   def implements_scoped_workspace_progress_for_test(pre_state, post_state),
     do: implements_scoped_workspace_progress?(pre_state, post_state)
 

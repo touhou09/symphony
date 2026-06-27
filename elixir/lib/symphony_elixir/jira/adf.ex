@@ -69,9 +69,7 @@ defmodule SymphonyElixir.Jira.ADF do
   defp node_to_text(_node), do: ""
 
   defp children_to_text(content) do
-    content
-    |> Enum.map(&node_to_text/1)
-    |> Enum.join("")
+    Enum.map_join(content, "", &node_to_text/1)
   end
 
   defp collapse_blank_lines(text) do
