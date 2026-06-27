@@ -25,6 +25,52 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "explicit and verifiable"
     assert prompt =~ "Tracker workpad-only progress is not implementation progress"
     assert prompt =~ "### Runtime Blocker"
+    assert prompt =~ "excluding `docs/codex-squad-evidence.md`"
+  end
+
+  test "implementer workspace progress requires non-evidence file edits" do
+    workspace =
+      Path.join(System.tmp_dir!(), "symphony-implementer-no-diff-guard-#{System.unique_integer([:positive, :monotonic])}")
+
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace) end)
+    assert {_output, 0} = System.cmd("git", ["-C", workspace, "init", "-q"], stderr_to_stdout: true)
+
+    pre_state = AgentRunner.workspace_change_state_for_test(workspace)
+    assert pre_state == %{}
+
+    evidence_path = Path.join(workspace, "docs/codex-squad-evidence.md")
+    File.mkdir_p!(Path.dirname(evidence_path))
+    File.write!(evidence_path, "# Codex squad evidence\n")
+
+    evidence_state = AgentRunner.workspace_change_state_for_test(workspace)
+    refute AgentRunner.implements_scoped_workspace_progress_for_test(pre_state, evidence_state)
+
+    target_path = Path.join(workspace, "lib/symphony_elixir/some_fix.ex")
+    File.mkdir_p!(Path.dirname(target_path))
+    File.write!(target_path, "defmodule SomeFix do end")
+
+    code_state = AgentRunner.workspace_change_state_for_test(workspace)
+    assert AgentRunner.implements_scoped_workspace_progress_for_test(evidence_state, code_state)
+  end
+
+  test "implementer workspace progress detects same-size content edits" do
+    workspace =
+      Path.join(System.tmp_dir!(), "symphony-implementer-same-size-guard-#{System.unique_integer([:positive, :monotonic])}")
+
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace) end)
+    assert {_output, 0} = System.cmd("git", ["-C", workspace, "init", "-q"], stderr_to_stdout: true)
+
+    target_path = Path.join(workspace, "lib/symphony_elixir/same_size_fix.ex")
+    File.mkdir_p!(Path.dirname(target_path))
+    File.write!(target_path, "abcdef\n")
+
+    pre_state = AgentRunner.workspace_change_state_for_test(workspace)
+    File.write!(target_path, "ghijkl\n")
+    post_state = AgentRunner.workspace_change_state_for_test(workspace)
+
+    assert AgentRunner.implements_scoped_workspace_progress_for_test(pre_state, post_state)
   end
 
   test "config defaults and validation checks" do

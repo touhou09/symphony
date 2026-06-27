@@ -44,6 +44,10 @@ defmodule SymphonyElixir.AgentRunner do
       :ok ->
         :ok
 
+      {:error, {:runtime_blocker, _} = reason} ->
+        Logger.error("Agent run blocked for #{issue_context(issue)}: #{inspect(reason)}")
+        exit(reason)
+
       {:error, reason} ->
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
         raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
@@ -131,6 +135,7 @@ defmodule SymphonyElixir.AgentRunner do
     |> Enum.reduce_while(:ok, fn {{role, model}, role_number}, :ok ->
       prompt = build_squad_role_prompt(issue, opts, role, model, role_number, total_roles)
       command = codex_command_for_model(settings.codex.command, model)
+      implementer_before_change_state = if role == "implementer", do: workspace_change_state(workspace), else: :skip
 
       case AppServer.start_session(workspace, worker_host: worker_host, codex_command: command) do
         {:ok, session} ->
@@ -142,11 +147,25 @@ defmodule SymphonyElixir.AgentRunner do
                    on_message: codex_message_handler(codex_update_recipient, issue)
                  ) do
               {:ok, turn_session} ->
-                Logger.info(
-                  "Completed squad role for #{issue_context(issue)} role=#{role} model=#{model} session_id=#{turn_session[:session_id]} workspace=#{workspace} role_turn=#{role_number}/#{total_roles}"
-                )
+                role_progress_result =
+                  if role == "implementer" do
+                    verify_implementer_turn_progress(implementer_before_change_state, workspace)
+                  else
+                    :ok
+                  end
 
-                {:cont, :ok}
+                case role_progress_result do
+                  :ok ->
+                    Logger.info(
+                      "Completed squad role for #{issue_context(issue)} role=#{role} model=#{model} session_id=#{turn_session[:session_id]} workspace=#{workspace} role_turn=#{role_number}/#{total_roles}"
+                    )
+
+                    {:cont, :ok}
+
+                  {:error, reason} ->
+                    Logger.warning("Implementer role blocked early for #{issue_context(issue)}: #{reason}")
+                    {:halt, {:error, {:runtime_blocker, reason}}}
+                end
 
               {:error, reason} ->
                 {:halt, {:error, {:squad_role_failed, role, reason}}}
@@ -224,7 +243,7 @@ defmodule SymphonyElixir.AgentRunner do
     Role contract:
     - Before any tracker comment/write tool call, create or update a workspace file so `git status --short` is non-empty. The preferred first edit is `#{@squad_evidence_path}`.
     - `cto`: first create or refresh `#{@squad_evidence_path}` with `## Scope` and `## CTO Plan`; define bounded implementation and validation criteria.
-    - `implementer`: first create a failing/regression test or the smallest code/docs edit in the workspace, then implement the scoped changes and write `## Implementation` with role/model/result. The first edit path must be explicit and verifiable in evidence.
+    - `implementer`: first create a failing/regression test or the smallest code/docs edit in the workspace (excluding `#{@squad_evidence_path}`), then implement the scoped changes and write `## Implementation` with role/model/result. The first edit path must be explicit and verifiable in evidence.
     - verifier roles: first append a verification note to `#{@squad_evidence_path}`, inspect the diff and evidence, run targeted validation, then add a `## Verification` checklist row exactly containing the verifier role, configured model, and `PASS` or `FAIL`.
 
     No-diff contract:
@@ -236,6 +255,116 @@ defmodule SymphonyElixir.AgentRunner do
     - If this role cannot complete, update the tracker workpad with the concrete blocker and stop instead of guessing.
     """
   end
+
+  defp verify_implementer_turn_progress(:skip, _workspace), do: :ok
+
+  defp verify_implementer_turn_progress(:unknown, _workspace),
+    do: {:error, "workspace status could not be verified for implementer change checks"}
+
+  defp verify_implementer_turn_progress(:error, _workspace),
+    do: {:error, "workspace status could not be verified for implementer change checks"}
+
+  defp verify_implementer_turn_progress(pre_state, workspace) when is_map(pre_state) and is_binary(workspace) do
+    post_state = workspace_change_state(workspace)
+
+    case post_state do
+      :unknown ->
+        {:error, "workspace status could not be verified for implementer change checks"}
+
+      post_state when is_map(post_state) ->
+        if implements_scoped_workspace_progress?(pre_state, post_state) do
+          :ok
+        else
+          {:error, "implementer must make a workspace edit outside #{@squad_evidence_path} before tracker progress updates"}
+        end
+    end
+  end
+
+  defp implements_scoped_workspace_progress?(pre_state, post_state)
+       when is_map(pre_state) and is_map(post_state) do
+    Enum.any?(post_state, fn {path, post_signature} ->
+      path != @squad_evidence_path and Map.get(pre_state, path) != post_signature
+    end) or
+      Enum.any?(pre_state, fn {path, pre_signature} ->
+        path != @squad_evidence_path and Map.get(post_state, path) != pre_signature
+      end)
+  end
+
+  defp implements_scoped_workspace_progress?(_pre_state, _post_state), do: false
+
+  defp workspace_change_state(workspace) when is_binary(workspace) and workspace != "" do
+    case workspace_status_map(workspace) do
+      :unknown -> :unknown
+      entries -> entries
+    end
+  end
+
+  defp workspace_change_state(_workspace), do: :unknown
+
+  defp workspace_status_map(path) do
+    case System.cmd("git", ["-C", path, "status", "--porcelain=v1", "--branch", "-uall"], stderr_to_stdout: true) do
+      {output, 0} ->
+        parse_workspace_change_map(path, output)
+
+      {_output, _status} ->
+        :unknown
+    end
+  rescue
+    _ -> :unknown
+  end
+
+  defp parse_workspace_change_map(workspace, output) when is_binary(workspace) and is_binary(output) do
+    output
+    |> String.split("\n", trim: true)
+    |> Enum.reject(&String.starts_with?(&1, "## "))
+    |> Enum.map(&trim_workspace_status_path/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.reduce(%{}, fn path, acc ->
+      Map.put(acc, path, workspace_entry_signature(Path.join(workspace, path)))
+    end)
+  end
+
+  defp trim_workspace_status_path(line) when is_binary(line) do
+    if String.starts_with?(line, "?? ") or String.starts_with?(line, "R") do
+      case String.split(line, " -> ") do
+        [_from, to] -> String.trim(to)
+        _ -> String.slice(line, 3..-1//1) |> String.trim()
+      end
+    else
+      String.slice(line, 3..-1//1)
+      |> String.trim()
+    end
+  end
+
+  defp trim_workspace_status_path(_line), do: ""
+
+  defp workspace_entry_signature(path) when is_binary(path) do
+    if File.exists?(path) do
+      case File.stat(path, time: :posix) do
+        {:ok, %File.Stat{type: :regular}} -> file_content_signature(path)
+        {:ok, %File.Stat{type: type, size: size}} -> {type, size}
+        {:error, _reason} -> :unknown
+      end
+    else
+      :missing
+    end
+  end
+
+  defp workspace_entry_signature(_path), do: :unknown
+
+  defp file_content_signature(path) do
+    case File.read(path) do
+      {:ok, contents} -> {:sha256, :crypto.hash(:sha256, contents)}
+      {:error, _reason} -> :unknown
+    end
+  end
+
+  @doc false
+  def workspace_change_state_for_test(path), do: workspace_change_state(path)
+
+  @doc false
+  def implements_scoped_workspace_progress_for_test(pre_state, post_state),
+    do: implements_scoped_workspace_progress?(pre_state, post_state)
 
   defp squad_roles(settings) do
     model_roles = settings.agent.model_roles

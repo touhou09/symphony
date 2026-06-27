@@ -1198,6 +1198,101 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert blocker_body =~ "codex exceeded no-diff token limit"
   end
 
+  test "runtime-blocker errors from implementer turns are posted immediately" do
+    issue_id = "issue-runtime-blocker-turn"
+    issue_url = "https://example.org/issues/MT-RUNTIME-BLOCKER"
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_comments, [
+      %{issue_id: issue_id, id: "comment-1", body: "## Codex Workpad\n\n### Notes"}
+    ])
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{
+        id: issue_id,
+        identifier: "MT-RUNTIME-BLOCKER",
+        state: "In Progress",
+        url: issue_url
+      }
+    ])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      codex_max_no_diff_tokens: 50
+    )
+
+    workspace_path =
+      Path.join(System.tmp_dir!(), "symphony-implementer-blocker-#{System.unique_integer([:positive, :monotonic])}")
+
+    File.mkdir_p!(workspace_path)
+    on_exit(fn -> File.rm_rf(workspace_path) end)
+    assert {_output, 0} = System.cmd("git", ["init", "-q", workspace_path], stderr_to_stdout: true)
+
+    orchestrator_name = Module.concat(__MODULE__, :RuntimeBlockerOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    ref = make_ref()
+    started_at = DateTime.utc_now()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: ref,
+      identifier: "MT-RUNTIME-BLOCKER",
+      issue: %Issue{
+        id: issue_id,
+        identifier: "MT-RUNTIME-BLOCKER",
+        state: "In Progress",
+        url: issue_url
+      },
+      worker_host: nil,
+      workspace_path: workspace_path,
+      session_id: "thread-runtime-blocker-turn",
+      turn_count: 1,
+      last_codex_message: nil,
+      last_codex_timestamp: started_at,
+      last_codex_event: :notification,
+      codex_input_tokens: 40,
+      codex_output_tokens: 20,
+      codex_total_tokens: 60,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, ref, :process, worker_pid, {:runtime_blocker, "implementer did not make a scoped workspace edit"}})
+
+    Process.sleep(100)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    assert state.blocked[issue_id].error == "implementer did not make a scoped workspace edit"
+    assert is_nil(state.retry_attempts[issue_id])
+    assert_receive {:memory_tracker_comments_requested, ^issue_id}
+    assert_receive {:memory_tracker_comment_update, ^issue_id, "comment-1", blocker_body}
+    assert blocker_body =~ "<!-- symphony-runtime-blocker:no-diff-token-limit -->"
+  end
+
   test "poll cycle blocks no-diff workers when workspace status is unavailable" do
     issue_id = "issue-no-diff-unknown"
 

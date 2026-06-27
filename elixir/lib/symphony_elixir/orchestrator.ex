@@ -241,6 +241,14 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp handle_agent_down({:runtime_blocker, reason}, state, issue_id, running_entry, session_id) do
+    error = if is_binary(reason), do: reason, else: "runtime blocker: #{inspect(reason)}"
+
+    Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}; #{error}")
+
+    block_no_diff_agent_down(state, issue_id, running_entry, session_id, error)
+  end
+
   defp handle_agent_down(reason, state, issue_id, running_entry, session_id) do
     case no_diff_token_limit_error(running_entry) do
       nil ->
