@@ -249,8 +249,6 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       String.contains?(normalized, "## blocker")
   end
 
-  defp runtime_blocker_comment?(_body), do: false
-
   defp workspace_change_status(path) when is_binary(path) and path != "" do
     case System.cmd("git", ["-C", path, "status", "--porcelain=v1", "--branch"], stderr_to_stdout: true) do
       {output, 0} -> parse_git_status(output)

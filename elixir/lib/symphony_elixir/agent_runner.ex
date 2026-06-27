@@ -371,8 +371,6 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp workspace_entry_signature(_path), do: :unknown
-
   defp file_content_signature(path) do
     case File.read(path) do
       {:ok, contents} -> {:sha256, :crypto.hash(:sha256, contents)}
