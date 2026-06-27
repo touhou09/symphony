@@ -130,3 +130,11 @@
 - **Test**: `mix format --check-formatted`, targeted ExUnit 67/67, `git diff --check`, Docker image build OK, probe Compose run receives `GH_TOKEN`, token shape check passed, GitHub API probe returned 200, and `git ls-remote` succeeded.
 - **Next**: Continue monitoring live SYM-6/SYM-13/SYM-11 publication for PR creation.
 ---
+
+## 2026-06-27: Dev-lane CI activation [done]
+- **What**: Activated `make-all` for `dev`, then cleared the strict lint, coverage, flaky timing, and dialyzer blockers exposed by PR #8.
+- **Why**: The active Symphony development lane needed a real GitHub Actions signal before merging accumulated work back to `main`.
+- **Impact**: `dev` pushes can now surface build/lint/test/coverage/dialyzer regressions; the coverage gate starts at the observed 85% baseline.
+- **Test**: Local `mix format --check-formatted`, `mix specs.check`, `mix test --cover` 323/323, `mix dialyzer --format short`, `git diff --check`, and GitHub Actions run 28291515215 passed.
+- **Trap**: Enabling CI exposed sequential stale debt: Credo strict failures, an impossible 100% coverage threshold, one scheduler-sensitive assertion, and two unreachable dialyzer clauses.
+---
