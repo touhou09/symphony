@@ -125,6 +125,37 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Ticket do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:required_description_sections, {:array, :string}, default: [])
+      field(:require_acceptance_checkboxes, :boolean, default: false)
+      field(:require_validation_checkboxes, :boolean, default: false)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [:required_description_sections, :require_acceptance_checkboxes, :require_validation_checkboxes],
+        empty_values: []
+      )
+      |> update_change(:required_description_sections, &normalize_required_sections/1)
+    end
+
+    defp normalize_required_sections(sections) when is_list(sections) do
+      sections
+      |> Enum.map(&(to_string(&1) |> String.trim()))
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+    end
+  end
+
   defmodule Agent do
     @moduledoc false
     use Ecto.Schema
@@ -133,26 +164,53 @@ defmodule SymphonyElixir.Config.Schema do
     alias SymphonyElixir.Config.Schema
 
     @primary_key false
+    @default_model_roles %{
+      "cto" => "gpt-5.5",
+      "implementer" => "gpt-5.3-codex-spark",
+      "verifier" => "gpt-5.4",
+      "final_verifier" => "gpt-5.5"
+    }
+    @default_required_verifiers ["verifier", "final_verifier"]
+
     embedded_schema do
       field(:max_concurrent_agents, :integer, default: 10)
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
       field(:max_concurrent_agents_by_state, :map, default: %{})
+      field(:model_roles, :map, default: @default_model_roles)
+      field(:required_verifiers, {:array, :string}, default: @default_required_verifiers)
     end
+
+    @spec default_model_roles() :: map()
+    def default_model_roles, do: @default_model_roles
+
+    @spec default_required_verifiers() :: [String.t()]
+    def default_required_verifiers, do: @default_required_verifiers
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
       |> cast(
         attrs,
-        [:max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [
+          :max_concurrent_agents,
+          :max_turns,
+          :max_retry_backoff_ms,
+          :max_concurrent_agents_by_state,
+          :model_roles,
+          :required_verifiers
+        ],
         empty_values: []
       )
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
+      |> update_change(:model_roles, &Schema.normalize_model_roles/1)
+      |> update_change(:required_verifiers, &Schema.normalize_required_verifiers/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
+      |> Schema.validate_model_roles(:model_roles)
+      |> Schema.validate_required_verifiers(:required_verifiers, :model_roles)
     end
   end
 
@@ -180,6 +238,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
+      field(:max_no_diff_tokens, :integer, default: 0)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -194,7 +253,8 @@ defmodule SymphonyElixir.Config.Schema do
           :turn_sandbox_policy,
           :turn_timeout_ms,
           :read_timeout_ms,
-          :stall_timeout_ms
+          :stall_timeout_ms,
+          :max_no_diff_tokens
         ],
         empty_values: []
       )
@@ -202,6 +262,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:max_no_diff_tokens, greater_than_or_equal_to: 0)
     end
   end
 
@@ -272,6 +333,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:ticket, Ticket, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
@@ -357,6 +419,67 @@ defmodule SymphonyElixir.Config.Schema do
     end)
   end
 
+  @doc false
+  @spec normalize_model_roles(nil | map()) :: map()
+  def normalize_model_roles(nil), do: Agent.default_model_roles()
+
+  def normalize_model_roles(roles) when is_map(roles) do
+    roles
+    |> normalize_keys()
+    |> Enum.reduce(Agent.default_model_roles(), fn {role, model}, acc ->
+      Map.put(acc, String.trim(to_string(role)), normalize_role_model(model))
+    end)
+  end
+
+  @doc false
+  @spec normalize_required_verifiers(nil | [term()]) :: [String.t()]
+  def normalize_required_verifiers(nil), do: Agent.default_required_verifiers()
+
+  def normalize_required_verifiers(verifiers) when is_list(verifiers) do
+    verifiers
+    |> Enum.map(&(to_string(&1) |> String.trim()))
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  @doc false
+  @spec validate_model_roles(Ecto.Changeset.t(), atom()) :: Ecto.Changeset.t()
+  def validate_model_roles(changeset, field) do
+    validate_change(changeset, field, fn ^field, roles ->
+      Enum.flat_map(roles, fn {role, model} ->
+        cond do
+          role == "" ->
+            [{field, "role names must not be blank"}]
+
+          not is_binary(model) or String.trim(model) == "" ->
+            [{field, "models must be non-empty strings"}]
+
+          true ->
+            []
+        end
+      end)
+    end)
+  end
+
+  @doc false
+  @spec validate_required_verifiers(Ecto.Changeset.t(), atom(), atom()) :: Ecto.Changeset.t()
+  def validate_required_verifiers(changeset, verifiers_field, roles_field) do
+    validate_change(changeset, verifiers_field, fn ^verifiers_field, verifiers ->
+      roles =
+        changeset
+        |> get_field(roles_field, %{})
+        |> normalize_model_roles()
+
+      Enum.flat_map(verifiers, fn verifier ->
+        if Map.has_key?(roles, verifier) do
+          []
+        else
+          [{verifiers_field, "verifier #{inspect(verifier)} must exist in model_roles"}]
+        end
+      end)
+    end)
+  end
+
   defp changeset(attrs) do
     %__MODULE__{}
     |> cast(attrs, [])
@@ -364,6 +487,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
+    |> cast_embed(:ticket, with: &Ticket.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
@@ -484,6 +608,9 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp normalize_secret_value(_value), do: nil
+
+  defp normalize_role_model(model) when is_binary(model), do: String.trim(model)
+  defp normalize_role_model(model), do: model
 
   defp default_turn_sandbox_policy(workspace) do
     %{

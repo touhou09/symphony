@@ -83,6 +83,27 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @spec squad_prompt_context() :: map()
+  def squad_prompt_context do
+    settings = settings!()
+
+    %{
+      "model_roles" => settings.agent.model_roles,
+      "required_verifiers" => settings.agent.required_verifiers
+    }
+  end
+
+  @spec ticket_content_check_options() :: keyword()
+  def ticket_content_check_options do
+    ticket = settings!().ticket
+
+    [
+      required_sections: ticket.required_description_sections,
+      require_acceptance_checkboxes: ticket.require_acceptance_checkboxes,
+      require_validation_checkboxes: ticket.require_validation_checkboxes
+    ]
+  end
+
   @spec server_port() :: non_neg_integer() | nil
   def server_port do
     case Application.get_env(:symphony_elixir, :server_port_override) do

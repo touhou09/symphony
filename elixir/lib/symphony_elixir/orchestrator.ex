@@ -177,6 +177,31 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  def handle_info(
+        {:agent_runtime_blocker, issue_id, reason},
+        %{running: running} = state
+      )
+      when is_binary(issue_id) do
+    case Map.get(running, issue_id) do
+      nil ->
+        {:noreply, state}
+
+      running_entry ->
+        Logger.warning("Agent runtime blocker for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} reason=#{inspect(reason)}")
+
+        {:noreply,
+         state
+         |> record_session_completion_totals(running_entry)
+         |> stop_and_block_issue(
+           issue_id,
+           running_entry,
+           "agent runtime blocker: #{inspect(reason)}"
+         )}
+    end
+  end
+
+  def handle_info({:agent_runtime_blocker, _issue_id, _reason}, state), do: {:noreply, state}
+
   def handle_info({:codex_worker_update, _issue_id, _update}, state), do: {:noreply, state}
 
   def handle_info({:retry_issue, issue_id, retry_token}, state) do

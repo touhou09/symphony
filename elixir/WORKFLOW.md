@@ -29,13 +29,30 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
+  model_roles:
+    cto: gpt-5.5
+    implementer: gpt-5.3-codex-spark
+    verifier: gpt-5.4
+    final_verifier: gpt-5.5
+  required_verifiers:
+    - verifier
+    - final_verifier
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   approval_policy: never
   thread_sandbox: workspace-write
+  max_no_diff_tokens: 1024
   turn_sandbox_policy:
     type: workspaceWrite
     networkAccess: true
+ticket:
+  required_description_sections:
+    - Background
+    - Scope
+    - Acceptance Criteria
+    - Validation
+  require_acceptance_checkboxes: true
+  require_validation_checkboxes: true
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`
@@ -68,6 +85,10 @@ Instructions:
 1. This is an unattended orchestration session. Never ask a human to perform follow-up actions.
 2. Only stop early for a true blocker (missing required auth/permissions/secrets). If blocked, record it in the workpad and move the issue according to workflow.
 3. Final message must report completed actions and blockers only. Do not include "next steps for user".
+4. Implementer role must perform the first safe repository write before any tracker workpad updates or role-status narrative updates in the same turn.
+   - Make one code/test/docs file edit first (for example, update a test, runtime guard, or docs), run `git status --short`, and only then update the workpad.
+   - Evidence-only edits do not satisfy implementer progress unless they accompany a scoped code/test/docs change or an explicit runtime blocker.
+   - If no safe repository file edit exists for an issue, write a runtime blocker note in the workpad and stop before analysis-only work.
 
 Work only in the provided repository copy. Do not touch any other path.
 
