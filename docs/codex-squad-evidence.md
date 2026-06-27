@@ -88,4 +88,7 @@
   - No-`mise` smoke with restricted PATH returned `HOOK_SMOKE_MISE=MISSINPATH`, showed direct `mix workspace.*` hook commands, and emitted no `mise: not found`.
   - `make -C elixir all`: fail because the shell used a non-dev Mix environment where `mix credo` is unavailable.
   - `MIX_ENV=dev make -C elixir all`: setup, build, format, lint, and squad-check passed; coverage failed on pre-existing/unrelated full-suite issues (`lazy_html` unavailable in dev coverage LiveView tests and a retry-backoff timing assertion).
+  - PR published: https://github.com/touhou09/symphony/pull/10 against `dev` with the `symphony` label.
+  - PR feedback sweep: zero top-level comments, zero inline comments, zero reviews.
+  - GitHub checks on the PR branch were polled after publish: `validate-pr-description` success, `make-all` success.
 - [x] final_verifier (gpt-5.5): PASS - required SYM-15 validation passed, evidence contains verifier and final_verifier PASS rows, and residual risk is limited to existing environment-sensitive/full-suite issues outside the hook dependency change.
