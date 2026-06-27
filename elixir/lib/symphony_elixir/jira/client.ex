@@ -376,15 +376,91 @@ defmodule SymphonyElixir.Jira.Client do
   end
 
   defp default_request(:get, url, _body, headers) do
-    Req.get(url, headers: headers, connect_options: [timeout: 30_000])
+    Req.get(url, headers: headers, connect_options: connect_options_for(url))
   end
 
   defp default_request(:post, url, body, headers) do
-    Req.post(url, headers: headers, json: body, connect_options: [timeout: 30_000])
+    Req.post(url, headers: headers, json: body, connect_options: connect_options_for(url))
   end
 
   defp default_request(:put, url, body, headers) do
-    Req.put(url, headers: headers, json: body, connect_options: [timeout: 30_000])
+    Req.put(url, headers: headers, json: body, connect_options: connect_options_for(url))
+  end
+
+  defp connect_options_for(url, env \\ &System.get_env/1) do
+    case proxy_for_url(url, env) do
+      nil -> [timeout: 30_000]
+      proxy -> [timeout: 30_000, proxy: proxy]
+    end
+  end
+
+  defp proxy_for_url(url, env) when is_binary(url) do
+    uri = URI.parse(url)
+
+    if proxy_bypassed?(uri.host, env) do
+      nil
+    else
+      uri.scheme
+      |> proxy_env(env)
+      |> parse_proxy()
+    end
+  end
+
+  defp proxy_for_url(_url, _env), do: nil
+
+  defp proxy_env("https", env), do: first_env(env, ~w(HTTPS_PROXY https_proxy HTTP_PROXY http_proxy))
+  defp proxy_env("http", env), do: first_env(env, ~w(HTTP_PROXY http_proxy))
+  defp proxy_env(_scheme, _env), do: nil
+
+  defp first_env(env, names) do
+    Enum.find_value(names, fn name ->
+      case env.(name) do
+        value when is_binary(value) ->
+          value = String.trim(value)
+          if value == "", do: nil, else: value
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp parse_proxy(nil), do: nil
+
+  defp parse_proxy(value) when is_binary(value) do
+    normalized = if String.contains?(value, "://"), do: value, else: "http://" <> value
+    uri = URI.parse(normalized)
+
+    with scheme when scheme in ["http", "https"] <- uri.scheme,
+         host when is_binary(host) and host != "" <- uri.host do
+      {String.to_existing_atom(scheme), host, uri.port || default_proxy_port(scheme), []}
+    else
+      _ -> nil
+    end
+  end
+
+  defp default_proxy_port("http"), do: 80
+  defp default_proxy_port("https"), do: 443
+
+  defp proxy_bypassed?(nil, _env), do: false
+
+  defp proxy_bypassed?(host, env) when is_binary(host) do
+    no_proxy = first_env(env, ~w(NO_PROXY no_proxy))
+    host = String.downcase(host)
+
+    no_proxy
+    |> to_string()
+    |> String.split(",", trim: true)
+    |> Enum.map(&(String.trim(&1) |> String.downcase()))
+    |> Enum.any?(fn
+      "*" -> true
+      entry when entry == "" -> false
+      entry -> host == entry or String.ends_with?(host, "." <> String.trim_leading(entry, "."))
+    end)
+  end
+
+  if Mix.env() == :test do
+    def proxy_connect_options_for_test(url, env), do: connect_options_for(url, env)
   end
 
   defp error_body(%{body: body}) when is_binary(body) do

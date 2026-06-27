@@ -3,6 +3,31 @@ defmodule SymphonyElixir.Jira.ClientTest do
 
   alias SymphonyElixir.Jira.Client
 
+  test "default Jira requests use HTTPS proxy env when configured" do
+    env = fn
+      "HTTPS_PROXY" -> "http://host.docker.internal:18081"
+      "NO_PROXY" -> "localhost,127.0.0.1"
+      _name -> nil
+    end
+
+    options = Client.proxy_connect_options_for_test("https://example.atlassian.net/rest/api/3/search/jql", env)
+
+    assert options[:timeout] == 30_000
+    assert options[:proxy] == {:http, "host.docker.internal", 18_081, []}
+  end
+
+  test "default Jira requests respect NO_PROXY host matches" do
+    env = fn
+      "HTTPS_PROXY" -> "http://host.docker.internal:18081"
+      "NO_PROXY" -> ".atlassian.net"
+      _name -> nil
+    end
+
+    options = Client.proxy_connect_options_for_test("https://example.atlassian.net/rest/api/3/search/jql", env)
+
+    assert options == [timeout: 30_000]
+  end
+
   test "candidate search uses jira status ids when configured" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "jira",
