@@ -230,3 +230,16 @@ Security boundary review:
   `<workspace>/.codex/config.toml` and sets `HOME=<workspace>/.codex` only for
   local container execution.
 - Evidence and tests list key names only and do not include token values.
+
+## Handoff Evidence
+
+- PR URL: https://github.com/touhou09/symphony/pull/11
+- Config path summary: host config is mounted read-only at
+  `/run/symphony/codex-host/config.toml`; sanitized runtime config is written
+  to `<workspace>/.codex/config.toml`; auth remains mounted separately at
+  `/root/.codex/auth.json`.
+- Required container config key names documented in evidence only:
+  `model`, `model_reasoning_effort`, `shell_environment_policy`,
+  `mcp_servers`, and `projects`.
+- PR checks on commit `a222d2c`: `make-all` success,
+  `validate-pr-description` success.
