@@ -70,6 +70,69 @@ mise exec -- mix build
 mise exec -- ./bin/symphony ./WORKFLOW.md
 ```
 
+## Docker Compose deployment
+
+The repository includes a local Compose deployment for running Symphony as a Codex-backed squad
+orchestrator:
+
+```bash
+cp .env.example .env
+# Fill the tracker credentials for the WORKFLOW.md tracker.kind you use.
+docker compose build orchestrator
+docker compose up orchestrator
+```
+
+The Compose service builds an image with Symphony and the Codex CLI, mounts `elixir/WORKFLOW.md`
+read-only, mounts host Codex credentials from `~/.codex/auth.json` and `~/.codex/config.toml`
+read-only, and stores workspaces/logs in named Docker volumes. It runs headless by default; omit
+`--port` unless you explicitly want the optional dashboard.
+
+The default `WORKFLOW.md` is prepared for Compose by reading `workspace.root` from
+`$SYMPHONY_WORKSPACE_ROOT` and cloning `$SYMPHONY_SOURCE_REPO` when set.
+
+For Jira, switch the tracker block in `WORKFLOW.md` to `kind: jira` and set:
+
+```yaml
+tracker:
+  kind: jira
+  endpoint: $JIRA_ENDPOINT
+  api_key: $JIRA_API_TOKEN
+  email: $JIRA_EMAIL
+  project_slug: SYM
+```
+
+`JIRA_ENDPOINT` should be the Jira Cloud site URL such as `https://your-site.atlassian.net`.
+`JIRA_API_TOKEN` is used with `JIRA_EMAIL` via Jira Cloud Basic auth.
+
+## Codex squad mode
+
+`agent.model_roles` describes the Codex model split used by squad mode:
+
+```yaml
+agent:
+  squad_enabled: true
+  model_roles:
+    cto: gpt-5.5
+    implementer: gpt-5.3-codex-spark
+    verifier: gpt-5.4
+    final_verifier: gpt-5.5
+  required_verifiers:
+    - verifier
+    - final_verifier
+```
+
+The prompt receives this configuration as `{{ squad.model_roles.* }}`. When `agent.squad_enabled`
+is true, Symphony starts separate Codex app-server sessions for CTO, implementer, verifier, and
+final verifier roles, injecting the configured model before `app-server` for each role. The role
+turns share one workspace and must produce a single evidence markdown file before handoff.
+
+Use the evidence gate before handoff or deployment:
+
+```bash
+cd elixir
+mix squad.check --file docs/codex-squad-evidence.example.md --workflow WORKFLOW.md
+```
+
 ## Configuration
 
 Pass a custom workflow file path to `./bin/symphony` when starting the service:
@@ -132,6 +195,10 @@ Notes:
   by the Codex turn sandbox.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
+- `agent.squad_enabled` switches execution from the legacy single-session loop to sequential
+  role-specific Codex app-server sessions using `agent.model_roles`. Default: `false`.
+- `codex.max_no_diff_tokens` blocks a running issue when token usage crosses the configured value
+  while the workspace has no git changes. Default: `0` (disabled).
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run

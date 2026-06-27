@@ -1,26 +1,56 @@
 ---
 tracker:
-  kind: linear
-  project_slug: "symphony-0c79b11b75ea"
+  kind: jira
+  project_slug: "SYM"
   required_labels: []
   active_states:
-    - Todo
-    - In Progress
-    - Merging
-    - Rework
+    - "\uBBF8\uD574\uACB0"
+    - "\uB2E4\uC2DC \uC5F4\uB9BC"
+    - "\uC9C0\uC6D0 \uB300\uAE30 \uC911"
+    - "\uC9C4\uD589 \uC911"
+    - "Work in progress"
+    - Pending
+    - "\uACE0\uAC1D \uB300\uAE30 \uC911"
+    - Escalated
+    - "Waiting for approval"
   terminal_states:
-    - Closed
-    - Cancelled
-    - Canceled
-    - Duplicate
-    - Done
+    - "\uC644\uB8CC"
+    - "\uC644\uB8CC\uB428"
+    - "\uC885\uB8CC"
+    - "\uCDE8\uC18C"
+    - "\uD574\uACB0\uB428"
+  active_status_ids:
+    - "1"
+    - "4"
+    - "10073"
+    - "3"
+    - "10076"
+    - "10077"
+    - "10075"
+    - "10079"
+    - "10078"
+  terminal_status_ids:
+    - "10072"
+    - "10071"
+    - "6"
+    - "10074"
+    - "5"
 polling:
   interval_ms: 5000
 workspace:
-  root: ~/code/symphony-workspaces
+  root: $SYMPHONY_WORKSPACE_ROOT
+ticket:
+  block_dispatch_on_invalid_ticket: true
+  required_description_sections:
+    - Background
+    - Scope
+    - Acceptance Criteria
+    - Validation
+  require_acceptance_checkboxes: true
+  require_validation_checkboxes: true
 hooks:
   after_create: |
-    git clone --depth 1 https://github.com/openai/symphony .
+    git clone --depth 1 "${SYMPHONY_SOURCE_REPO:-https://github.com/openai/symphony}" .
     if command -v mise >/dev/null 2>&1; then
       cd elixir && mise trust && mise exec -- mix deps.get
     fi
@@ -29,16 +59,25 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
+  squad_enabled: true
+  model_roles:
+    cto: gpt-5.5
+    implementer: gpt-5.3-codex-spark
+    verifier: gpt-5.4
+    final_verifier: gpt-5.5
+  required_verifiers:
+    - verifier
+    - final_verifier
 codex:
-  command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
+  command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.3-codex-spark"' --config model_reasoning_effort=medium app-server
   approval_policy: never
-  thread_sandbox: workspace-write
+  thread_sandbox: danger-full-access
   turn_sandbox_policy:
-    type: workspaceWrite
-    networkAccess: true
+    type: dangerFullAccess
+  max_no_diff_tokens: 0
 ---
 
-You are working on a Linear ticket `{{ issue.identifier }}`
+You are working on a Jira issue `{{ issue.identifier }}`
 
 {% if attempt %}
 Continuation context:
@@ -65,15 +104,30 @@ No description provided.
 
 Instructions:
 
+## Codex squad routing
+
+- CTO/planning role uses `{{ squad.model_roles.cto }}` and owns scope, acceptance criteria, decomposition, and final direction.
+- Implementation role uses `{{ squad.model_roles.implementer }}` for bounded code/test edits.
+- Verification role uses `{{ squad.model_roles.verifier }}` for fresh-context behavior and regression review.
+- Final verifier role uses `{{ squad.model_roles.final_verifier }}` for final evidence, scope, and residual-risk review.
+- Handoff requires `PASS` evidence from both `verifier` and `final_verifier` in a `## Verification` evidence section.
+
+## Ticket content contract
+
+- The ticket body must include `## Background`, `## Scope`, `## Acceptance Criteria`, and `## Validation` before Symphony dispatches an unattended run.
+- `## Acceptance Criteria` and `## Validation` must contain checklist items; treat each item as required work.
+- `Validation`, `Test Plan`, or `Testing` headings are equivalent validation input. Mirror them into the workpad without downgrading any item to optional.
+- If the ticket content is incomplete, stop before implementation, update the workpad/blocker comment with the missing sections, and do not guess requirements.
+
 1. This is an unattended orchestration session. Never ask a human to perform follow-up actions.
 2. Only stop early for a true blocker (missing required auth/permissions/secrets). If blocked, record it in the workpad and move the issue according to workflow.
 3. Final message must report completed actions and blockers only. Do not include "next steps for user".
 
 Work only in the provided repository copy. Do not touch any other path.
 
-## Prerequisite: Linear MCP or `linear_graphql` tool is available
+## Prerequisite: tracker access is available
 
-The agent should be able to talk to Linear, either via a configured Linear MCP server or injected `linear_graphql` tool. If none are present, stop and ask the user to configure Linear.
+The agent should use the issue context supplied by Symphony and the configured tracker integration. If tracker auth is missing or the issue cannot be read, stop and report the missing access.
 
 ## Default posture
 
@@ -82,11 +136,11 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - Spend extra effort up front on planning and verification design before implementation.
 - Reproduce first: always confirm the current behavior/issue signal before changing code so the fix target is explicit.
 - Keep ticket metadata current (state, checklist, acceptance criteria, links).
-- Treat a single persistent Linear comment as the source of truth for progress.
+- Treat a single persistent tracker comment as the source of truth for progress.
 - Use that single workpad comment for all progress and handoff notes; do not post separate "done"/summary comments.
 - Treat any ticket-authored `Validation`, `Test Plan`, or `Testing` section as non-negotiable acceptance input: mirror it in the workpad and execute it before considering the work complete.
 - When meaningful out-of-scope improvements are discovered during execution,
-  file a separate Linear issue instead of expanding scope. The follow-up issue
+  file a separate tracker issue instead of expanding scope. The follow-up issue
   must include a clear title, description, and acceptance criteria, be placed in
   `Backlog`, be assigned to the same project as the current issue, link the
   current issue as `related`, and use `blockedBy` when the follow-up depends on
@@ -97,41 +151,33 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 
 ## Related skills
 
-- `linear`: interact with Linear.
+- `sym-jira-ticket`: create or validate SYM Jira ticket bodies before dispatch.
 - `commit`: produce clean, logical commits during implementation.
 - `push`: keep remote branch current and publish updates.
 - `pull`: keep branch updated with latest `origin/main` before handoff.
-- `land`: when ticket reaches `Merging`, explicitly open and follow `.codex/skills/land/SKILL.md`, which includes the `land` loop.
 
-## Status map
+## SYM Jira Status Map
 
-- `Backlog` -> out of scope for this workflow; do not modify.
-- `Todo` -> queued; immediately transition to `In Progress` before active work.
-  - Special case: if a PR is already attached, treat as feedback/rework loop (run full PR feedback sweep, address or explicitly push back, revalidate, return to `Human Review`).
-- `In Progress` -> implementation actively underway.
-- `Human Review` -> PR is attached and validated; waiting on human approval.
-- `Merging` -> approved by human; execute the `land` skill flow (do not call `gh pr merge` directly).
-- `Rework` -> reviewer requested changes; planning + implementation required.
-- `Done` -> terminal state; no further action required.
+- `미해결`, `다시 열림`, `지원 대기 중` -> queued or active intake. Move to `진행 중` before implementation when that transition is available.
+- `진행 중`, `Work in progress`, `Pending`, `고객 대기 중`, `Escalated`, `Waiting for approval` -> active work or waiting state. Continue only when the ticket still has actionable implementation or verification work.
+- `완료`, `완료됨`, `종료`, `해결됨` -> successful terminal states. Do not dispatch or modify.
+- `취소` -> canceled terminal state. Use only for explicitly canceled work or smoke cleanup, never for successful implementation handoff.
+- For successful completion, prefer `해결됨` or `완료` when both success and cancel transitions are available.
 
 ## Step 0: Determine current ticket state and route
 
 1. Fetch the issue by explicit ticket ID.
 2. Read the current state.
 3. Route to the matching flow:
-   - `Backlog` -> do not modify issue content/state; stop and wait for human to move it to `Todo`.
-   - `Todo` -> immediately move to `In Progress`, then ensure bootstrap workpad comment exists (create if missing), then start execution flow.
-     - If PR is already attached, start by reviewing all open PR comments and deciding required changes vs explicit pushback responses.
-   - `In Progress` -> continue execution flow from current scratchpad comment.
-   - `Human Review` -> wait and poll for decision/review updates.
-   - `Merging` -> on entry, open and follow `.codex/skills/land/SKILL.md`; do not call `gh pr merge` directly.
-   - `Rework` -> run rework flow.
-   - `Done` -> do nothing and shut down.
+   - Active intake states (`미해결`, `다시 열림`, `지원 대기 중`) -> move to `진행 중` when available, ensure bootstrap workpad comment exists, then start execution flow.
+   - Active work states (`진행 중`, `Work in progress`, `Pending`, `고객 대기 중`, `Escalated`, `Waiting for approval`) -> continue execution flow from the current workpad.
+   - Successful terminal states (`완료`, `완료됨`, `종료`, `해결됨`) -> do nothing and shut down.
+   - `취소` -> do nothing and shut down as canceled work.
 4. Check whether a PR already exists for the current branch and whether it is closed.
    - If a branch PR exists and is `CLOSED` or `MERGED`, treat prior branch work as non-reusable for this run.
    - Create a fresh branch from `origin/main` and restart execution flow as a new attempt.
-5. For `Todo` tickets, do startup sequencing in this exact order:
-   - `update_issue(..., state: "In Progress")`
+5. For active intake tickets, do startup sequencing in this exact order:
+   - transition to `진행 중` when available
    - find/create `## Codex Workpad` bootstrap comment
    - only then begin analysis/planning/implementation work.
 6. Add a short comment if state and issue content are inconsistent, then proceed with the safest flow.
@@ -153,7 +199,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 5.  Ensure the workpad includes a compact environment stamp at the top as a code fence line:
     - Format: `<host>:<abs-workdir>@<short-sha>`
     - Example: `devbox-01:/home/dev-user/code/symphony-workspaces/MT-32@7bdde33bc`
-    - Do not include metadata already inferable from Linear issue fields (`issue ID`, `status`, `branch`, `PR link`).
+    - Do not include metadata already inferable from tracker issue fields (`issue ID`, `status`, `branch`, `PR link`).
 6.  Add explicit acceptance criteria and TODOs in checklist form in the same comment.
     - If changes are user-facing, include a UI walkthrough acceptance criterion that describes the end-to-end user path to validate.
     - If changes touch app files or app behavior, add explicit app-specific flow checks to `Acceptance Criteria` in the workpad (for example: launch path, changed interaction path, and expected result path).

@@ -788,6 +788,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       codex_turn_timeout_ms: nil,
       codex_read_timeout_ms: nil,
       codex_stall_timeout_ms: nil,
+      codex_max_no_diff_tokens: nil,
       tracker_api_token: nil,
       tracker_project_slug: nil
     )
@@ -800,6 +801,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
     assert config.worker.max_concurrent_agents_per_host == nil
     assert config.agent.max_concurrent_agents == 10
+
+    assert config.agent.model_roles == %{
+             "cto" => "gpt-5.5",
+             "implementer" => "gpt-5.3-codex-spark",
+             "verifier" => "gpt-5.4",
+             "final_verifier" => "gpt-5.5"
+           }
+
+    assert config.agent.required_verifiers == ["verifier", "final_verifier"]
     assert config.codex.command == "codex app-server"
 
     assert config.codex.approval_policy == %{
@@ -827,6 +837,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.turn_timeout_ms == 3_600_000
     assert config.codex.read_timeout_ms == 5_000
     assert config.codex.stall_timeout_ms == 300_000
+    assert config.codex.max_no_diff_tokens == 0
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_required_labels: [" Symphony ", "SYMPHONY", "JavaScript"]
@@ -883,6 +894,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "agent.max_concurrent_agents"
 
+    write_workflow_file!(Workflow.workflow_file_path(), agent_model_roles: %{cto: ""})
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "agent.model_roles"
+
+    write_workflow_file!(Workflow.workflow_file_path(), agent_required_verifiers: ["reviewer"])
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "agent.required_verifiers"
+
     write_workflow_file!(Workflow.workflow_file_path(), worker_max_concurrent_agents_per_host: 0)
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "worker.max_concurrent_agents_per_host"
@@ -898,6 +917,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), codex_stall_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.stall_timeout_ms"
+
+    write_workflow_file!(Workflow.workflow_file_path(), codex_max_no_diff_tokens: "bad")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.max_no_diff_tokens"
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_active_states: %{todo: true},
@@ -950,6 +973,39 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server")
     assert Config.settings!().codex.command == "codex app-server"
+  end
+
+  test "jira config requires an endpoint and can read it from env" do
+    previous_jira_endpoint = System.get_env("JIRA_ENDPOINT")
+    previous_jira_base_url = System.get_env("JIRA_BASE_URL")
+    previous_jira_site = System.get_env("JIRA_SITE")
+
+    on_exit(fn ->
+      restore_env("JIRA_ENDPOINT", previous_jira_endpoint)
+      restore_env("JIRA_BASE_URL", previous_jira_base_url)
+      restore_env("JIRA_SITE", previous_jira_site)
+    end)
+
+    System.delete_env("JIRA_ENDPOINT")
+    System.delete_env("JIRA_BASE_URL")
+    System.delete_env("JIRA_SITE")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "jira",
+      tracker_endpoint: nil,
+      tracker_api_token: "jira-token",
+      tracker_email: "dev@example.com",
+      tracker_project_slug: "SYM"
+    )
+
+    assert {:error, :missing_jira_endpoint} = Config.validate!()
+    assert Config.settings!().tracker.endpoint == nil
+
+    System.put_env("JIRA_ENDPOINT", "https://example.atlassian.net/")
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "jira", tracker_email: "dev@example.com")
+
+    assert :ok = Config.validate!()
+    assert Config.settings!().tracker.endpoint == "https://example.atlassian.net"
   end
 
   test "config resolves $VAR references for env-backed secret and path values" do

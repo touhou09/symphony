@@ -83,6 +83,32 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @spec squad_prompt_context() :: map()
+  def squad_prompt_context do
+    settings = settings!()
+
+    %{
+      "model_roles" => settings.agent.model_roles,
+      "required_verifiers" => settings.agent.required_verifiers
+    }
+  end
+
+  @spec ticket_content_preflight_enabled?() :: boolean()
+  def ticket_content_preflight_enabled? do
+    settings!().ticket.block_dispatch_on_invalid_ticket
+  end
+
+  @spec ticket_content_check_options() :: keyword()
+  def ticket_content_check_options do
+    ticket = settings!().ticket
+
+    [
+      required_sections: ticket.required_description_sections,
+      require_acceptance_checkboxes: ticket.require_acceptance_checkboxes,
+      require_validation_checkboxes: ticket.require_validation_checkboxes
+    ]
+  end
+
   @spec server_port() :: non_neg_integer() | nil
   def server_port do
     case Application.get_env(:symphony_elixir, :server_port_override) do
@@ -127,6 +153,9 @@ defmodule SymphonyElixir.Config do
 
       settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
         {:error, :missing_linear_project_slug}
+
+      settings.tracker.kind == "jira" and not is_binary(settings.tracker.endpoint) ->
+        {:error, :missing_jira_endpoint}
 
       settings.tracker.kind == "jira" and not is_binary(settings.tracker.api_key) ->
         {:error, :missing_jira_api_token}

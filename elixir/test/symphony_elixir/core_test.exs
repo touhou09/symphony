@@ -1,6 +1,31 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
+  test "squad codex command injects role model before app-server" do
+    assert AgentRunner.squad_codex_command_for_test(
+             "codex --config 'model=\"gpt-5.3-codex-spark\"' --config model_reasoning_effort=medium app-server",
+             "gpt-5.5"
+           ) ==
+             "codex --config 'model=\"gpt-5.3-codex-spark\"' --config model_reasoning_effort=medium --config 'model=\"gpt-5.5\"' app-server"
+  end
+
+  test "squad role prompt requires a file diff before tracker workpad updates" do
+    issue = %Issue{
+      id: "10657",
+      identifier: "SYM-11",
+      title: "Resolve no-diff execution loop",
+      description: "## Background\nNo-diff run"
+    }
+
+    prompt = AgentRunner.squad_role_prompt_for_test(issue, "implementer", "gpt-5.3-codex-spark", 2, 4)
+
+    assert prompt =~ "Before any tracker comment/write tool call"
+    assert prompt =~ "docs/codex-squad-evidence.md"
+    assert prompt =~ "first create a failing/regression test"
+    assert prompt =~ "Tracker workpad-only progress is not implementation progress"
+    assert prompt =~ "### Runtime Blocker"
+  end
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -17,6 +42,7 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
+    assert config.agent.squad_enabled == false
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
 
@@ -98,17 +124,29 @@ defmodule SymphonyElixir.CoreTest do
 
     tracker = Map.get(config, "tracker", %{})
     assert is_map(tracker)
-    assert Map.get(tracker, "kind") == "linear"
+    assert Map.get(tracker, "kind") == "jira"
     assert is_binary(Map.get(tracker, "project_slug"))
     assert is_list(Map.get(tracker, "active_states"))
     assert is_list(Map.get(tracker, "terminal_states"))
+    assert is_list(Map.get(tracker, "active_status_ids"))
+    assert is_list(Map.get(tracker, "terminal_status_ids"))
 
     hooks = Map.get(config, "hooks", %{})
     assert is_map(hooks)
-    assert Map.get(hooks, "after_create") =~ "git clone --depth 1 https://github.com/openai/symphony ."
+
+    assert Map.get(hooks, "after_create") =~
+             "git clone --depth 1 \"${SYMPHONY_SOURCE_REPO:-https://github.com/openai/symphony}\" ."
+
     assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
     assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
     assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
+
+    agent = Map.get(config, "agent", %{})
+    assert get_in(agent, ["model_roles", "cto"]) == "gpt-5.5"
+    assert get_in(agent, ["model_roles", "implementer"]) == "gpt-5.3-codex-spark"
+    assert get_in(agent, ["model_roles", "verifier"]) == "gpt-5.4"
+    assert get_in(agent, ["model_roles", "final_verifier"]) == "gpt-5.5"
+    assert Map.get(agent, "required_verifiers") == ["verifier", "final_verifier"]
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
@@ -179,6 +217,26 @@ defmodule SymphonyElixir.CoreTest do
 
     assert {:ok, %{config: %{}, prompt: "Prompt only", prompt_template: "Prompt only"}} =
              Workflow.load(workflow_path)
+  end
+
+  test "workflow load preserves UTF-8 prompt text" do
+    workflow_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "UTF8_WORKFLOW.md")
+
+    File.write!(workflow_path, """
+    ---
+    tracker:
+      kind: jira
+    ---
+    ## SYM Jira Status Map
+
+    - `미해결`, `다시 열림`, `지원 대기 중` -> active.
+    """)
+
+    assert {:ok, %{prompt: prompt, prompt_template: prompt}} = Workflow.load(workflow_path)
+    assert String.valid?(prompt)
+    assert prompt =~ "미해결"
+    assert prompt =~ "지원 대기 중"
+    assert Jason.encode!(%{prompt: prompt})
   end
 
   test "workflow load accepts unterminated front matter with an empty prompt" do
@@ -910,6 +968,24 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "attempt=3"
   end
 
+  test "prompt builder renders squad model routing context" do
+    workflow_prompt = "CTO={{ squad.model_roles.cto }} implementer={{ squad.model_roles.implementer }} verifier={{ squad.model_roles.verifier }} final={{ squad.model_roles.final_verifier }}"
+
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    issue = %Issue{
+      identifier: "S-2",
+      title: "Route Codex squad roles",
+      description: "Prompt should include configured model routing.",
+      state: "Todo",
+      url: "https://example.org/issues/S-2",
+      labels: ["squad"]
+    }
+
+    assert PromptBuilder.build_prompt(issue) ==
+             "CTO=gpt-5.5 implementer=gpt-5.3-codex-spark verifier=gpt-5.4 final=gpt-5.5"
+  end
+
   test "prompt builder renders issue datetime fields without crashing" do
     workflow_prompt = "Ticket {{ issue.identifier }} created={{ issue.created_at }} updated={{ issue.updated_at }}"
 
@@ -1083,7 +1159,7 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue, attempt: 2)
 
-    assert prompt =~ "You are working on a Linear ticket `MT-616`"
+    assert prompt =~ "You are working on a Jira issue `MT-616`"
     assert prompt =~ "Issue context:"
     assert prompt =~ "Identifier: MT-616"
     assert prompt =~ "Title: Use rich templates for WORKFLOW.md"

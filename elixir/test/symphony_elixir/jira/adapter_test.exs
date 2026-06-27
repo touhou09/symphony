@@ -30,9 +30,19 @@ defmodule SymphonyElixir.Jira.AdapterTest do
       Process.get({__MODULE__, :transition_result})
     end
 
+    def list_comments(issue_id) do
+      send(self(), {:list_comments_called, issue_id})
+      Process.get({__MODULE__, :comments_result})
+    end
+
     def add_comment(issue_id, body) do
       send(self(), {:add_comment_called, issue_id, body})
       Process.get({__MODULE__, :comment_result})
+    end
+
+    def update_comment(issue_id, comment_id, body) do
+      send(self(), {:update_comment_called, issue_id, comment_id, body})
+      Process.get({__MODULE__, :update_comment_result})
     end
   end
 
@@ -74,8 +84,12 @@ defmodule SymphonyElixir.Jira.AdapterTest do
     assert_receive {:fetch_issue_states_by_ids_called, ["10001"]}
   end
 
-  test "create_comment maps client success and failure" do
+  test "comment operations map client success and failure" do
     use_fake_client()
+
+    Process.put({FakeJiraClient, :comments_result}, {:ok, [%{"id" => "11381"}]})
+    assert {:ok, [%{"id" => "11381"}]} = Adapter.list_comments("10001")
+    assert_receive {:list_comments_called, "10001"}
 
     Process.put({FakeJiraClient, :comment_result}, {:ok, %{"id" => "1"}})
     assert :ok = Adapter.create_comment("10001", "hello")
@@ -83,6 +97,13 @@ defmodule SymphonyElixir.Jira.AdapterTest do
 
     Process.put({FakeJiraClient, :comment_result}, {:error, {:jira_api_status, 400}})
     assert {:error, {:jira_api_status, 400}} = Adapter.create_comment("10001", "bad")
+
+    Process.put({FakeJiraClient, :update_comment_result}, {:ok, %{"id" => "11381"}})
+    assert :ok = Adapter.update_comment("10001", "11381", "updated")
+    assert_receive {:update_comment_called, "10001", "11381", "updated"}
+
+    Process.put({FakeJiraClient, :update_comment_result}, {:error, {:jira_api_status, 404}})
+    assert {:error, {:jira_api_status, 404}} = Adapter.update_comment("10001", "missing", "updated")
   end
 
   test "update_issue_state resolves a transition by target status name" do
@@ -98,6 +119,26 @@ defmodule SymphonyElixir.Jira.AdapterTest do
     assert :ok = Adapter.update_issue_state("10001", " done ")
     assert_receive {:get_transitions_called, "10001"}
     assert_receive {:transition_issue_called, "10001", "31"}
+  end
+
+  test "update_issue_state prefers success terminal transitions for generic done targets" do
+    use_fake_client()
+
+    Process.put(
+      {FakeJiraClient, :transitions},
+      {:ok,
+       %{
+         "transitions" => [
+           %{"id" => "41", "to" => %{"name" => "취소"}},
+           %{"id" => "51", "to" => %{"name" => "해결됨"}}
+         ]
+       }}
+    )
+
+    Process.put({FakeJiraClient, :transition_result}, {:ok, %{}})
+
+    assert :ok = Adapter.update_issue_state("10001", "Done")
+    assert_receive {:transition_issue_called, "10001", "51"}
   end
 
   test "update_issue_state returns state_not_found when no transition matches" do

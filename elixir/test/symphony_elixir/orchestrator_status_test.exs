@@ -970,6 +970,331 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert remaining_ms <= 10_500
   end
 
+  test "orchestrator blocks workers that exceed the no-diff token limit" do
+    issue_id = "issue-no-diff-token-limit"
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_comments, [
+      %{issue_id: issue_id, id: "comment-1", body: "## Codex Workpad\n\n### Notes"}
+    ])
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{
+        id: issue_id,
+        identifier: "MT-NODIFF",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-NODIFF"
+      }
+    ])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      codex_max_no_diff_tokens: 50
+    )
+
+    workspace_path =
+      Path.join(System.tmp_dir!(), "symphony-no-diff-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workspace_path)
+    on_exit(fn -> File.rm_rf(workspace_path) end)
+    assert {_output, 0} = System.cmd("git", ["init", "-q", workspace_path], stderr_to_stdout: true)
+
+    orchestrator_name = Module.concat(__MODULE__, :NoDiffTokenLimitOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    started_at = DateTime.utc_now()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: "MT-NODIFF",
+      issue: %Issue{
+        id: issue_id,
+        identifier: "MT-NODIFF",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-NODIFF"
+      },
+      worker_host: nil,
+      workspace_path: workspace_path,
+      session_id: "thread-nodiff-turn-nodiff",
+      turn_count: 1,
+      last_codex_message: nil,
+      last_codex_timestamp: started_at,
+      last_codex_event: :notification,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{
+           "method" => "thread/tokenUsage/updated",
+           "params" => %{
+             "tokenUsage" => %{
+               "total" => %{"inputTokens" => 40, "outputTokens" => 20, "totalTokens" => 60}
+             }
+           }
+         },
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    Process.sleep(100)
+    state = :sys.get_state(pid)
+
+    refute Process.alive?(worker_pid)
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+    assert state.codex_totals.total_tokens == 60
+
+    assert %{
+             identifier: "MT-NODIFF",
+             workspace_path: ^workspace_path,
+             error: "codex exceeded no-diff token limit: 60 >= 50 and workspace has no git changes"
+           } = state.blocked[issue_id]
+
+    assert_receive {:memory_tracker_comments_requested, ^issue_id}
+    assert_receive {:memory_tracker_comment_update, ^issue_id, "comment-1", blocker_body}
+    assert blocker_body =~ "<!-- symphony-runtime-blocker:no-diff-token-limit -->"
+    assert blocker_body =~ "codex exceeded no-diff token limit"
+    assert blocker_body =~ workspace_path
+  end
+
+  test "poll cycle blocks no-diff workers without a new codex event" do
+    issue_id = "issue-no-diff-poll"
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_comments, [
+      %{issue_id: issue_id, id: "comment-1", body: "## Codex Workpad\n\n### Notes"}
+    ])
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{
+        id: issue_id,
+        identifier: "MT-NODIFF-POLL",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-NODIFF-POLL"
+      }
+    ])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      poll_interval_ms: 30_000,
+      codex_max_no_diff_tokens: 50
+    )
+
+    workspace_path =
+      Path.join(System.tmp_dir!(), "symphony-no-diff-poll-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workspace_path)
+    on_exit(fn -> File.rm_rf(workspace_path) end)
+    assert {_output, 0} = System.cmd("git", ["init", "-q", workspace_path], stderr_to_stdout: true)
+
+    orchestrator_name = Module.concat(__MODULE__, :NoDiffPollOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    started_at = DateTime.utc_now()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: "MT-NODIFF-POLL",
+      issue: %Issue{
+        id: issue_id,
+        identifier: "MT-NODIFF-POLL",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-NODIFF-POLL"
+      },
+      worker_host: nil,
+      workspace_path: workspace_path,
+      session_id: "thread-nodiff-poll-turn-nodiff-poll",
+      turn_count: 1,
+      last_codex_message: nil,
+      last_codex_timestamp: started_at,
+      last_codex_event: :notification,
+      codex_input_tokens: 40,
+      codex_output_tokens: 20,
+      codex_total_tokens: 60,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, :run_poll_cycle)
+
+    Process.sleep(100)
+    state = :sys.get_state(pid)
+
+    refute Process.alive?(worker_pid)
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+
+    assert %{
+             identifier: "MT-NODIFF-POLL",
+             workspace_path: ^workspace_path,
+             error: "codex exceeded no-diff token limit: 60 >= 50 and workspace has no git changes"
+           } = state.blocked[issue_id]
+
+    assert_receive {:memory_tracker_comments_requested, ^issue_id}
+    assert_receive {:memory_tracker_comment_update, ^issue_id, "comment-1", blocker_body}
+    assert blocker_body =~ "<!-- symphony-runtime-blocker:no-diff-token-limit -->"
+    assert blocker_body =~ "codex exceeded no-diff token limit"
+  end
+
+  test "normal completion blocks no-diff workers before continuation retry" do
+    issue_id = "issue-no-diff-normal-down"
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_comments, [
+      %{issue_id: issue_id, id: "comment-1", body: "## Codex Workpad\n\n### Notes"}
+    ])
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{
+        id: issue_id,
+        identifier: "MT-NODIFF-DOWN",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-NODIFF-DOWN"
+      }
+    ])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      codex_max_no_diff_tokens: 50
+    )
+
+    workspace_path =
+      Path.join(System.tmp_dir!(), "symphony-no-diff-down-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workspace_path)
+    on_exit(fn -> File.rm_rf(workspace_path) end)
+    assert {_output, 0} = System.cmd("git", ["init", "-q", workspace_path], stderr_to_stdout: true)
+
+    orchestrator_name = Module.concat(__MODULE__, :NoDiffNormalDownOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    ref = make_ref()
+    started_at = DateTime.utc_now()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: nil,
+      ref: ref,
+      identifier: "MT-NODIFF-DOWN",
+      issue: %Issue{
+        id: issue_id,
+        identifier: "MT-NODIFF-DOWN",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-NODIFF-DOWN"
+      },
+      worker_host: nil,
+      workspace_path: workspace_path,
+      session_id: "thread-nodiff-down-turn-nodiff-down",
+      turn_count: 1,
+      last_codex_message: nil,
+      last_codex_timestamp: started_at,
+      last_codex_event: :notification,
+      codex_input_tokens: 40,
+      codex_output_tokens: 20,
+      codex_total_tokens: 60,
+      codex_last_reported_input_tokens: 40,
+      codex_last_reported_output_tokens: 20,
+      codex_last_reported_total_tokens: 60,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+
+    Process.sleep(100)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+
+    assert %{
+             identifier: "MT-NODIFF-DOWN",
+             workspace_path: ^workspace_path,
+             error: "codex exceeded no-diff token limit: 60 >= 50 and workspace has no git changes"
+           } = state.blocked[issue_id]
+
+    assert_receive {:memory_tracker_comments_requested, ^issue_id}
+    assert_receive {:memory_tracker_comment_update, ^issue_id, "comment-1", blocker_body}
+    assert blocker_body =~ "<!-- symphony-runtime-blocker:no-diff-token-limit -->"
+  end
+
   test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,

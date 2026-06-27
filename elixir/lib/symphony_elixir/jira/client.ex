@@ -27,7 +27,7 @@ defmodule SymphonyElixir.Jira.Client do
     with :ok <- require_config(tracker),
          {:ok, assignee_filter} <- routing_assignee_filter(opts) do
       tracker.project_slug
-      |> candidate_jql(tracker.active_states, tracker.assignee)
+      |> candidate_jql(status_filters(tracker.active_status_ids, tracker.active_states), tracker.assignee)
       |> search_all(assignee_filter, opts)
     end
   end
@@ -45,7 +45,7 @@ defmodule SymphonyElixir.Jira.Client do
       with :ok <- require_config(tracker) do
         # No assignee clause: terminal cleanup must see issues regardless of assignee.
         tracker.project_slug
-        |> states_jql(normalized_states)
+        |> states_jql(status_filters_for_states(normalized_states, tracker))
         |> search_all(nil, opts)
       end
     end
@@ -82,9 +82,24 @@ defmodule SymphonyElixir.Jira.Client do
     request(:post, "/rest/api/3/issue/#{issue_id}/transitions", %{"transition" => %{"id" => transition_id}}, opts)
   end
 
+  @spec list_comments(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_comments(issue_id, opts \\ []) when is_binary(issue_id) do
+    with {:ok, response} <-
+           request(:get, "/rest/api/3/issue/#{issue_id}/comment?maxResults=100&orderBy=created", nil, opts),
+         {:ok, comments} <- decode_comments(response) do
+      {:ok, comments}
+    end
+  end
+
   @spec add_comment(String.t(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
   def add_comment(issue_id, body, opts \\ []) when is_binary(issue_id) and is_binary(body) do
     request(:post, "/rest/api/3/issue/#{issue_id}/comment", %{"body" => ADF.from_text(body)}, opts)
+  end
+
+  @spec update_comment(String.t(), String.t(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
+  def update_comment(issue_id, comment_id, body, opts \\ [])
+      when is_binary(issue_id) and is_binary(comment_id) and is_binary(body) do
+    request(:put, "/rest/api/3/issue/#{issue_id}/comment/#{comment_id}", %{"body" => ADF.from_text(body)}, opts)
   end
 
   @spec myself(keyword()) :: {:ok, map()} | {:error, term()}
@@ -107,13 +122,62 @@ defmodule SymphonyElixir.Jira.Client do
     Enum.join([project_clause(project_key), status_clause(states)], " AND ")
   end
 
-  defp ids_jql(ids), do: "id IN (#{Enum.join(ids, ",")})"
+  defp ids_jql(ids) do
+    ids
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.split_with(&numeric_issue_id?/1)
+    |> case do
+      {numeric_ids, []} ->
+        "id IN (#{Enum.join(numeric_ids, ",")})"
+
+      {[], issue_keys} ->
+        "key IN (#{issue_keys |> Enum.map(&jql_string/1) |> Enum.join(",")})"
+
+      {numeric_ids, issue_keys} ->
+        "(id IN (#{Enum.join(numeric_ids, ",")}) OR key IN (#{issue_keys |> Enum.map(&jql_string/1) |> Enum.join(",")}))"
+    end
+  end
+
+  defp numeric_issue_id?(value), do: String.match?(value, ~r/^\d+$/)
+
+  defp jql_string(value) do
+    escaped = String.replace(value, "\"", "\\\"")
+    "\"#{escaped}\""
+  end
 
   defp project_clause(project_key), do: ~s(project = "#{project_key}")
 
   defp status_clause(states) do
-    quoted = states |> Enum.map(&~s("#{&1}")) |> Enum.join(",")
-    "status IN (#{quoted})"
+    values = states |> Enum.map(&jql_status_value/1) |> Enum.join(",")
+    "status IN (#{values})"
+  end
+
+  defp status_filters(status_ids, _state_names) when is_list(status_ids) and status_ids != [], do: status_ids
+  defp status_filters(_status_ids, state_names), do: state_names
+
+  defp status_filters_for_states(state_names, tracker) do
+    cond do
+      same_states?(state_names, tracker.terminal_states) and tracker.terminal_status_ids != [] -> tracker.terminal_status_ids
+      same_states?(state_names, tracker.active_states) and tracker.active_status_ids != [] -> tracker.active_status_ids
+      true -> state_names
+    end
+  end
+
+  defp same_states?(left, right) do
+    MapSet.new(left, &normalize_state_name/1) == MapSet.new(right, &normalize_state_name/1)
+  end
+
+  defp normalize_state_name(value), do: value |> to_string() |> String.trim() |> String.downcase()
+
+  defp jql_status_value(value) do
+    value = value |> to_string() |> String.trim()
+
+    if Regex.match?(~r/^\d+$/, value) do
+      value
+    else
+      ~s("#{String.replace(value, <<34>>, <<92, 34>>)}")
+    end
   end
 
   defp assignee_clause("me"), do: ["assignee = currentUser()"]
@@ -162,7 +226,10 @@ defmodule SymphonyElixir.Jira.Client do
   defp sort_by_requested_ids(issues, ids) do
     order = ids |> Enum.with_index() |> Map.new()
     fallback = map_size(order)
-    Enum.sort_by(issues, fn issue -> Map.get(order, issue.id, fallback) end)
+
+    Enum.sort_by(issues, fn issue ->
+      Map.get(order, issue.id) || Map.get(order, issue.identifier, fallback)
+    end)
   end
 
   defp maybe_put_page_token(body, nil), do: body
@@ -184,6 +251,31 @@ defmodule SymphonyElixir.Jira.Client do
   end
 
   defp decode_search(_unknown, _assignee_filter), do: {:error, :jira_unknown_payload}
+
+  defp decode_comments(%{"comments" => comments}) when is_list(comments) do
+    {:ok, Enum.map(comments, &normalize_comment/1)}
+  end
+
+  defp decode_comments(%{"errorMessages" => errors}) do
+    {:error, {:jira_api_errors, errors}}
+  end
+
+  defp decode_comments(_unknown), do: {:error, :jira_unknown_comment_payload}
+
+  defp normalize_comment(%{} = comment) do
+    %{
+      "id" => comment["id"],
+      "body" => ADF.to_text(comment["body"]) || "",
+      "created_at" => comment["created"],
+      "updated_at" => comment["updated"],
+      "author" => comment_author(comment["author"])
+    }
+  end
+
+  defp comment_author(%{"displayName" => name}) when is_binary(name), do: name
+  defp comment_author(%{"name" => name}) when is_binary(name), do: name
+  defp comment_author(%{"emailAddress" => email}) when is_binary(email), do: email
+  defp comment_author(_author), do: nil
 
   defp next_page_token(%{"isLast" => true}), do: nil
   defp next_page_token(%{"nextPageToken" => token}) when is_binary(token) and token != "", do: token
@@ -227,6 +319,7 @@ defmodule SymphonyElixir.Jira.Client do
 
   defp require_config(tracker) do
     cond do
+      is_nil(tracker.endpoint) -> {:error, :missing_jira_endpoint}
       is_nil(tracker.api_key) -> {:error, :missing_jira_api_token}
       is_nil(tracker.email) -> {:error, :missing_jira_email}
       is_nil(tracker.project_slug) -> {:error, :missing_jira_project_key}
@@ -288,6 +381,10 @@ defmodule SymphonyElixir.Jira.Client do
 
   defp default_request(:post, url, body, headers) do
     Req.post(url, headers: headers, json: body, connect_options: [timeout: 30_000])
+  end
+
+  defp default_request(:put, url, body, headers) do
+    Req.put(url, headers: headers, json: body, connect_options: [timeout: 30_000])
   end
 
   defp error_body(%{body: body}) when is_binary(body) do

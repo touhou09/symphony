@@ -5,9 +5,25 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
+  alias SymphonyElixir.Squad.EvidenceCheck
   alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
+
+  @squad_evidence_path "docs/codex-squad-evidence.md"
+
+  @doc false
+  @spec squad_codex_command_for_test(String.t(), String.t()) :: String.t()
+  def squad_codex_command_for_test(command, model) when is_binary(command) and is_binary(model) do
+    codex_command_for_model(command, model)
+  end
+
+  @doc false
+  @spec squad_role_prompt_for_test(Issue.t(), String.t(), String.t(), pos_integer(), pos_integer()) :: String.t()
+  def squad_role_prompt_for_test(%Issue{} = issue, role, model, role_number, total_roles)
+      when is_binary(role) and is_binary(model) and is_integer(role_number) and is_integer(total_roles) do
+    build_squad_role_prompt(issue, [], role, model, role_number, total_roles)
+  end
 
   @doc false
   @spec continue_with_issue_for_test(Issue.t(), ([String.t()] -> term())) ::
@@ -85,6 +101,14 @@ defmodule SymphonyElixir.AgentRunner do
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+    if Config.settings!().agent.squad_enabled do
+      run_squad_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+    else
+      run_single_agent_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+    end
+  end
+
+  defp run_single_agent_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
@@ -94,6 +118,50 @@ defmodule SymphonyElixir.AgentRunner do
       after
         AppServer.stop_session(session)
       end
+    end
+  end
+
+  defp run_squad_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+    settings = Config.settings!()
+    roles = squad_roles(settings)
+    total_roles = length(roles)
+
+    roles
+    |> Enum.with_index(1)
+    |> Enum.reduce_while(:ok, fn {{role, model}, role_number}, :ok ->
+      prompt = build_squad_role_prompt(issue, opts, role, model, role_number, total_roles)
+      command = codex_command_for_model(settings.codex.command, model)
+
+      case AppServer.start_session(workspace, worker_host: worker_host, codex_command: command) do
+        {:ok, session} ->
+          try do
+            case AppServer.run_turn(
+                   session,
+                   prompt,
+                   issue,
+                   on_message: codex_message_handler(codex_update_recipient, issue)
+                 ) do
+              {:ok, turn_session} ->
+                Logger.info(
+                  "Completed squad role for #{issue_context(issue)} role=#{role} model=#{model} session_id=#{turn_session[:session_id]} workspace=#{workspace} role_turn=#{role_number}/#{total_roles}"
+                )
+
+                {:cont, :ok}
+
+              {:error, reason} ->
+                {:halt, {:error, {:squad_role_failed, role, reason}}}
+            end
+          after
+            AppServer.stop_session(session)
+          end
+
+        {:error, reason} ->
+          {:halt, {:error, {:squad_role_start_failed, role, reason}}}
+      end
+    end)
+    |> case do
+      :ok -> validate_squad_evidence(workspace)
+      {:error, _reason} = error -> error
     end
   end
 
@@ -136,6 +204,69 @@ defmodule SymphonyElixir.AgentRunner do
           {:error, reason}
       end
     end
+  end
+
+  defp build_squad_role_prompt(issue, opts, role, model, role_number, total_roles) do
+    base_prompt = PromptBuilder.build_prompt(issue, opts)
+
+    """
+    #{base_prompt}
+
+    ## Symphony squad role turn
+
+    Role: #{role}
+    Model: #{model}
+    Role turn: #{role_number}/#{total_roles}
+    Evidence file: #{@squad_evidence_path}
+
+    Run this role as a separate Codex squad context. Keep all durable handoff evidence in `#{@squad_evidence_path}`.
+
+    Role contract:
+    - Before any tracker comment/write tool call, create or update a workspace file so `git status --short` is non-empty. The preferred first edit is `#{@squad_evidence_path}`.
+    - `cto`: first create or refresh `#{@squad_evidence_path}` with `## Scope` and `## CTO Plan`; define bounded implementation and validation criteria.
+    - `implementer`: first create a failing/regression test or the smallest code/docs edit, then implement the scoped changes and write `## Implementation` with role/model/result.
+    - verifier roles: first append a verification note to `#{@squad_evidence_path}`, inspect the diff and evidence, run targeted validation, then add a `## Verification` checklist row exactly containing the verifier role, configured model, and `PASS` or `FAIL`.
+
+    No-diff contract:
+    - Tracker workpad-only progress is not implementation progress. If no safe first file edit exists, write a `### Runtime Blocker` comment with the concrete blocker and stop before extended analysis.
+    - Run `git status --short` before tracker workpad updates. A normal workpad update is allowed only after the workspace has a code, test, docs, or evidence diff.
+
+    Completion contract:
+    - Do not mark the issue successful unless `mix squad.check --file #{@squad_evidence_path} --workflow WORKFLOW.md` passes.
+    - If this role cannot complete, update the tracker workpad with the concrete blocker and stop instead of guessing.
+    """
+  end
+
+  defp squad_roles(settings) do
+    model_roles = settings.agent.model_roles
+
+    ["cto", "implementer" | settings.agent.required_verifiers]
+    |> Enum.uniq()
+    |> Enum.map(fn role -> {role, Map.fetch!(model_roles, role)} end)
+  end
+
+  defp validate_squad_evidence(workspace) do
+    evidence_path = Path.join(workspace, @squad_evidence_path)
+
+    case EvidenceCheck.validate_file(evidence_path, Config.squad_prompt_context()) do
+      :ok -> :ok
+      {:error, errors} -> {:error, {:squad_evidence_failed, errors}}
+    end
+  end
+
+  defp codex_command_for_model(command, model) when is_binary(command) and is_binary(model) do
+    config_arg = "--config " <> shell_quote("model=#{inspect(model)}")
+    trimmed = String.trim(command)
+
+    if Regex.match?(~r/\bapp-server\s*$/, trimmed) do
+      Regex.replace(~r/\s+app-server\s*$/, trimmed, " #{config_arg} app-server")
+    else
+      trimmed <> " " <> config_arg
+    end
+  end
+
+  defp shell_quote(value) when is_binary(value) do
+    "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
   end
 
   defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
