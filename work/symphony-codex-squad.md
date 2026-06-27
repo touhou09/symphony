@@ -127,8 +127,8 @@
 ---
 
 ## 2026-06-27: Completion PR publish hook [done]
-- **What**: Added a workspace completion hook that commits, pushes, and opens or discovers a GitHub PR after Symphony work leaves active execution.
+- **What**: Added a workspace completion hook that commits, pushes, and opens or discovers a GitHub PR after Symphony work leaves active execution, then redeployed the Compose orchestrator.
 - **Why**: Finished Jira work must leave a reviewable branch/PR even when the unattended agent exits before manually attaching one.
-- **Impact**: Completed fork workspaces now publish against `touhou09/symphony` with base `feat/jira-tracker-adapter`; SYM-6 and SYM-11 were published as PR #1 and #2.
-- **Test**: `mix format`, targeted ExUnit 65/65, `git push` for both workspace branches, and GitHub PR lookup confirmed both PRs open.
+- **Impact**: Completed fork workspaces now publish against `touhou09/symphony` with base `feat/jira-tracker-adapter`; SYM-6, SYM-11, and the feature branch are open as PR #1, #2, and #3 with the `symphony` label.
+- **Test**: `mix format`, targeted ExUnit 65/65, `git push` for all branches, GitHub PR lookup confirmed PRs open, Docker build/up succeeded, container env points at the fork branch, and the named volume preserved SYM-6/SYM-11 commits.
 ---
