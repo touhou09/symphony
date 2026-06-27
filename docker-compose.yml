@@ -10,7 +10,10 @@ services:
     environment:
       HOME: /root
       SYMPHONY_WORKSPACE_ROOT: /var/lib/symphony/workspaces
-      SYMPHONY_SOURCE_REPO: ${SYMPHONY_SOURCE_REPO:-https://github.com/openai/symphony}
+      SYMPHONY_SOURCE_REPO: ${SYMPHONY_SOURCE_REPO:-https://github.com/touhou09/symphony}
+      SYMPHONY_SOURCE_BRANCH: ${SYMPHONY_SOURCE_BRANCH:-dev}
+      SYMPHONY_PR_REPO: ${SYMPHONY_PR_REPO:-touhou09/symphony}
+      SYMPHONY_PR_BASE: ${SYMPHONY_PR_BASE:-dev}
     volumes:
       - ./elixir/WORKFLOW.md:/app/elixir/WORKFLOW.md:ro
       - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro

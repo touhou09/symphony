@@ -132,3 +132,10 @@
 - **Impact**: Completed fork workspaces now publish against `touhou09/symphony` with base `feat/jira-tracker-adapter`; SYM-6, SYM-11, and the feature branch are open as PR #1, #2, and #3 with the `symphony` label.
 - **Test**: `mix format`, targeted ExUnit 65/65, `git push` for all branches, GitHub PR lookup confirmed PRs open, Docker build/up succeeded, container env points at the fork branch, and the named volume preserved SYM-6/SYM-11 commits.
 ---
+
+## 2026-06-27: Main/dev branch flow [done]
+- **What**: Collapsed the fork branch model to `main` and `dev`, with Compose/workflow defaults cloning `touhou09/symphony` from `dev` and publishing completed work back to `dev`.
+- **Why**: Symphony needs one predictable development lane: work accumulates on `dev`, then review/merge moves the integrated result to `main`.
+- **Impact**: New unattended workspaces and completion PRs now target the fork's `dev` branch by default instead of the deleted feature branch.
+- **Test**: Branch listing confirmed only `origin/main` and `origin/dev` on the fork; dev-to-main PR and deployment checks are the release gate for this flow.
+---

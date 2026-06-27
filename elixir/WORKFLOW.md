@@ -50,8 +50,8 @@ ticket:
   require_validation_checkboxes: true
 hooks:
   after_create: |
-    repo="${SYMPHONY_SOURCE_REPO:-https://github.com/openai/symphony}"
-    branch="${SYMPHONY_SOURCE_BRANCH:-}"
+    repo="${SYMPHONY_SOURCE_REPO:-https://github.com/touhou09/symphony}"
+    branch="${SYMPHONY_SOURCE_BRANCH:-dev}"
     if [ -n "$branch" ]; then
       git clone --depth 1 --branch "$branch" "$repo" .
     else
@@ -61,7 +61,7 @@ hooks:
       cd elixir && mise trust && mise exec -- mix deps.get
     fi
   after_complete: |
-    cd elixir && mise exec -- mix workspace.publish_pr --repo "${SYMPHONY_PR_REPO:-touhou09/symphony}" --base "${SYMPHONY_PR_BASE:-feat/jira-tracker-adapter}"
+    cd elixir && mise exec -- mix workspace.publish_pr --repo "${SYMPHONY_PR_REPO:-touhou09/symphony}" --base "${SYMPHONY_PR_BASE:-dev}"
   before_remove: |
     cd elixir && mise exec -- mix workspace.before_remove
 agent:
