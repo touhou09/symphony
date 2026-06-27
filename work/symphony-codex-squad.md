@@ -1,28 +1,3 @@
-## 2026-06-26: Codex squad mode and Compose deployment [done]
-- **What**: Added configurable Codex squad role routing, evidence gate, headless Docker Compose orchestrator deployment path, and Jira endpoint validation.
-- **Why**: Keep GPT-5.5 responsible for scope/final judgment while using GPT-5.3 Codex Spark for bounded implementation and requiring GPT-5.4 plus GPT-5.5 verifier passes before handoff.
-- **Impact**: Symphony operators can run the orchestrator through Compose without exposing the UI and enforce a visible cross-model evidence packet before review/deploy.
-- **Test**: `mix format --check-formatted`, targeted ExUnit 53/53, `mix squad.check`, `docker compose build orchestrator`, headless Docker smoke without exposed ports, Jira/config regression tests 81/81, and Compose config succeeded.
-- **Trap**: Initial Compose build hit Colima disk pressure while exporting the Codex npm layer; pruning Docker build cache recovered enough space and the same image build then completed.
-- **Next**: Real Jira polling requires `.env` values for `JIRA_ENDPOINT`, `JIRA_API_TOKEN`, `JIRA_EMAIL`, and the Jira project key in `WORKFLOW.md`; smoke deployment intentionally used no committed secrets.
----
-
-## 2026-06-26: Jira SYM live smoke and status-id polling [done]
-- **What**: Persisted local ignored Jira env, switched the sample workflow to SYM/Jira, and added Jira status ID filters for polling while preserving status names for orchestration and transitions.
-- **Why**: Jira Cloud returned zero results for localized status-name JQL (`미해결`) but returned the same issue by status ID, so candidate polling needed an ID-backed path for Korean service desk projects.
-- **Impact**: Symphony can authenticate to `yujin3178.atlassian.net`, poll SYM candidates, write comments, and transition Jira issues without relying on public project access.
-- **Test**: Relevant ExUnit 91/91, live smoke created `SYM-1`/`SYM-2`/`SYM-3`, verified read/comment/transition, and confirmed all smoke issues ended in `완료` with candidate queue back to 0.
-- **Trap**: YAML frontmatter could not parse raw Korean state names in this setup; keeping names as `\uXXXX` escapes preserved parsed Korean values while making the file parser-safe.
----
-
-## 2026-06-26: Jira-backed full-flow E2E smoke [done]
-- **What**: Ran a bounded full orchestration smoke using an ignored temp workflow and fake Codex app-server against real Jira `SYM` issue `SYM-4`.
-- **Why**: Separate tracker-level live smoke from the end-to-end Symphony loop: Jira poll, workspace creation, app-server session/turn, Jira comment, terminal transition, retry cleanup, and dashboard state.
-- **Impact**: The Jira/SYM pipeline is verified through the orchestrator without spending model tokens or letting a real unattended model modify code during smoke.
-- **Test**: `SYM-4` dispatched, workspace files were created under `/private/tmp/symphony-full-e2e-workspaces/SYM-4`, fake app-server completed one turn, Jira state ended as `완료`, and final snapshot showed running/blocked/retrying all empty.
-- **Next**: A separate real-Codex E2E would validate model behavior and prompt compliance; this smoke validates the Symphony plumbing and Jira integration.
----
-
 ## 2026-06-26: SYM Jira ticket form constraints [done]
 - **What**: Queried SYM Jira project metadata, JSM request types, request form fields, issue create metadata, and validated one JSM request creation path.
 - **Why**: A reusable ticket skill needs to choose between JSM request forms and raw Jira issue creation; their required fields and description formats differ.
@@ -146,4 +121,12 @@
 - **Impact**: Intake, Jira state transition, workspace clone from `touhou09/symphony@dev`, and CTO evidence generation worked; implementation-to-PR handoff did not complete.
 - **Test**: Ticket preflight passed in both skill and repo checkers; SYM-12 reached `진행 중`, created `/var/lib/symphony/workspaces/SYM-12`, but only produced `docs/codex-squad-evidence.md` and no PR before the run was stopped at about 597,500 tokens.
 - **Trap**: `codex.max_no_diff_tokens` was disabled for the `dev` deployment, so evidence-only progress bypassed the previous no-diff stop; SYM-12 was commented with the smoke result and moved to `취소` to prevent redispatch.
+---
+
+## 2026-06-27: GitHub token publish path [done]
+- **What**: Wired `GH_TOKEN`/`GITHUB_TOKEN` into Compose and taught the publish hook to use env-backed git askpass plus GitHub API PR creation when `gh` is unavailable.
+- **Why**: Live SYM-6/SYM-13 handoff showed HTTPS push and GitHub connector auth failures, while the orchestrator image does not include `gh`.
+- **Impact**: A rotated token in the ignored `.env` can authenticate `git push` and PR creation without storing token values in git config or command args.
+- **Test**: `mix format --check-formatted`, targeted ExUnit 67/67, `git diff --check`, Docker image build OK, probe Compose run receives `GH_TOKEN`, token shape check passed, GitHub API probe returned 200, and `git ls-remote` succeeded.
+- **Next**: Continue monitoring live SYM-6/SYM-13/SYM-11 publication for PR creation.
 ---
