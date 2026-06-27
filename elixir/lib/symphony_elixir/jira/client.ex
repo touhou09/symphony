@@ -1,0 +1,484 @@
+defmodule SymphonyElixir.Jira.Client do
+  @moduledoc """
+  Thin Jira Cloud REST v3 client for polling candidate issues and performing
+  the tracker write operations (transitions, comments).
+
+  Mirrors `SymphonyElixir.Linear.Client` but speaks REST/JQL instead of GraphQL.
+  Auth is HTTP Basic with `email:api_token`. All HTTP goes through `request/4`,
+  whose `:request_fun` option is overridable in tests to avoid the network.
+  """
+
+  require Logger
+  alias SymphonyElixir.Config
+  alias SymphonyElixir.Jira.{ADF, Normalizer}
+
+  @issue_page_size 50
+  @search_fields ~w(summary description priority status assignee labels issuelinks created updated)
+  @max_error_body_log_bytes 1_000
+
+  # ------------------------------------------------------------------
+  # Read callbacks (SymphonyElixir.Tracker)
+  # ------------------------------------------------------------------
+
+  @spec fetch_candidate_issues(keyword()) :: {:ok, [SymphonyElixir.Linear.Issue.t()]} | {:error, term()}
+  def fetch_candidate_issues(opts \\ []) do
+    tracker = Config.settings!().tracker
+
+    with :ok <- require_config(tracker),
+         {:ok, assignee_filter} <- routing_assignee_filter(opts) do
+      tracker.project_slug
+      |> candidate_jql(status_filters(tracker.active_status_ids, tracker.active_states), tracker.assignee)
+      |> search_all(assignee_filter, opts)
+    end
+  end
+
+  @spec fetch_issues_by_states([String.t()], keyword()) ::
+          {:ok, [SymphonyElixir.Linear.Issue.t()]} | {:error, term()}
+  def fetch_issues_by_states(state_names, opts \\ []) when is_list(state_names) do
+    normalized_states = state_names |> Enum.map(&to_string/1) |> Enum.uniq()
+
+    if normalized_states == [] do
+      {:ok, []}
+    else
+      tracker = Config.settings!().tracker
+
+      with :ok <- require_config(tracker) do
+        # No assignee clause: terminal cleanup must see issues regardless of assignee.
+        tracker.project_slug
+        |> states_jql(status_filters_for_states(normalized_states, tracker))
+        |> search_all(nil, opts)
+      end
+    end
+  end
+
+  @spec fetch_issue_states_by_ids([String.t()], keyword()) ::
+          {:ok, [SymphonyElixir.Linear.Issue.t()]} | {:error, term()}
+  def fetch_issue_states_by_ids(issue_ids, opts \\ []) when is_list(issue_ids) do
+    ids = Enum.uniq(issue_ids)
+
+    case ids do
+      [] ->
+        {:ok, []}
+
+      ids ->
+        with {:ok, assignee_filter} <- routing_assignee_filter(opts) do
+          fetch_by_ids(ids, assignee_filter, opts)
+        end
+    end
+  end
+
+  # ------------------------------------------------------------------
+  # Write operations (used by SymphonyElixir.Jira.Adapter)
+  # ------------------------------------------------------------------
+
+  @spec get_transitions(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def get_transitions(issue_id, opts \\ []) when is_binary(issue_id) do
+    request(:get, "/rest/api/3/issue/#{issue_id}/transitions", nil, opts)
+  end
+
+  @spec transition_issue(String.t(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
+  def transition_issue(issue_id, transition_id, opts \\ [])
+      when is_binary(issue_id) and is_binary(transition_id) do
+    request(:post, "/rest/api/3/issue/#{issue_id}/transitions", %{"transition" => %{"id" => transition_id}}, opts)
+  end
+
+  @spec list_comments(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_comments(issue_id, opts \\ []) when is_binary(issue_id) do
+    with {:ok, response} <-
+           request(:get, "/rest/api/3/issue/#{issue_id}/comment?maxResults=100&orderBy=created", nil, opts),
+         {:ok, comments} <- decode_comments(response) do
+      {:ok, comments}
+    end
+  end
+
+  @spec add_comment(String.t(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
+  def add_comment(issue_id, body, opts \\ []) when is_binary(issue_id) and is_binary(body) do
+    request(:post, "/rest/api/3/issue/#{issue_id}/comment", %{"body" => ADF.from_text(body)}, opts)
+  end
+
+  @spec update_comment(String.t(), String.t(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
+  def update_comment(issue_id, comment_id, body, opts \\ [])
+      when is_binary(issue_id) and is_binary(comment_id) and is_binary(body) do
+    request(:put, "/rest/api/3/issue/#{issue_id}/comment/#{comment_id}", %{"body" => ADF.from_text(body)}, opts)
+  end
+
+  @spec myself(keyword()) :: {:ok, map()} | {:error, term()}
+  def myself(opts \\ []) do
+    request(:get, "/rest/api/3/myself", nil, opts)
+  end
+
+  # ------------------------------------------------------------------
+  # JQL construction
+  # ------------------------------------------------------------------
+
+  defp candidate_jql(project_key, active_states, assignee) do
+    [project_clause(project_key), status_clause(active_states)]
+    |> Kernel.++(assignee_clause(assignee))
+    |> Enum.join(" AND ")
+    |> Kernel.<>(" ORDER BY priority ASC, created ASC")
+  end
+
+  defp states_jql(project_key, states) do
+    Enum.join([project_clause(project_key), status_clause(states)], " AND ")
+  end
+
+  defp ids_jql(ids) do
+    ids
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.split_with(&numeric_issue_id?/1)
+    |> case do
+      {numeric_ids, []} ->
+        "id IN (#{Enum.join(numeric_ids, ",")})"
+
+      {[], issue_keys} ->
+        "key IN (#{issue_keys |> Enum.map(&jql_string/1) |> Enum.join(",")})"
+
+      {numeric_ids, issue_keys} ->
+        "(id IN (#{Enum.join(numeric_ids, ",")}) OR key IN (#{issue_keys |> Enum.map(&jql_string/1) |> Enum.join(",")}))"
+    end
+  end
+
+  defp numeric_issue_id?(value), do: String.match?(value, ~r/^\d+$/)
+
+  defp jql_string(value) do
+    escaped = String.replace(value, "\"", "\\\"")
+    "\"#{escaped}\""
+  end
+
+  defp project_clause(project_key), do: ~s(project = "#{project_key}")
+
+  defp status_clause(states) do
+    values = states |> Enum.map(&jql_status_value/1) |> Enum.join(",")
+    "status IN (#{values})"
+  end
+
+  defp status_filters(status_ids, _state_names) when is_list(status_ids) and status_ids != [], do: status_ids
+  defp status_filters(_status_ids, state_names), do: state_names
+
+  defp status_filters_for_states(state_names, tracker) do
+    cond do
+      same_states?(state_names, tracker.terminal_states) and tracker.terminal_status_ids != [] -> tracker.terminal_status_ids
+      same_states?(state_names, tracker.active_states) and tracker.active_status_ids != [] -> tracker.active_status_ids
+      true -> state_names
+    end
+  end
+
+  defp same_states?(left, right) do
+    MapSet.new(left, &normalize_state_name/1) == MapSet.new(right, &normalize_state_name/1)
+  end
+
+  defp normalize_state_name(value), do: value |> to_string() |> String.trim() |> String.downcase()
+
+  defp jql_status_value(value) do
+    value = value |> to_string() |> String.trim()
+
+    if Regex.match?(~r/^\d+$/, value) do
+      value
+    else
+      ~s("#{String.replace(value, <<34>>, <<92, 34>>)}")
+    end
+  end
+
+  defp assignee_clause("me"), do: ["assignee = currentUser()"]
+  defp assignee_clause(account_id) when is_binary(account_id), do: [~s(assignee = "#{account_id}")]
+  defp assignee_clause(_assignee), do: []
+
+  # ------------------------------------------------------------------
+  # Search + pagination
+  # ------------------------------------------------------------------
+
+  defp search_all(jql, assignee_filter, opts) do
+    search_page(jql, assignee_filter, opts, nil, [])
+  end
+
+  defp search_page(jql, assignee_filter, opts, page_token, acc) do
+    body =
+      %{"jql" => jql, "fields" => @search_fields, "maxResults" => @issue_page_size}
+      |> maybe_put_page_token(page_token)
+
+    with {:ok, response} <- request(:post, "/rest/api/3/search/jql", body, opts),
+         {:ok, issues, next_token} <- decode_search(response, assignee_filter) do
+      updated_acc = Enum.reverse(issues, acc)
+
+      case next_token do
+        nil -> {:ok, Enum.reverse(updated_acc)}
+        token -> search_page(jql, assignee_filter, opts, token, updated_acc)
+      end
+    end
+  end
+
+  defp fetch_by_ids(ids, assignee_filter, opts) do
+    ids
+    |> Enum.chunk_every(@issue_page_size)
+    |> Enum.reduce_while({:ok, []}, fn chunk, {:ok, acc} ->
+      case search_all(ids_jql(chunk), assignee_filter, opts) do
+        {:ok, issues} -> {:cont, {:ok, Enum.reverse(issues, acc)}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, sort_by_requested_ids(Enum.reverse(acc), ids)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp sort_by_requested_ids(issues, ids) do
+    order = ids |> Enum.with_index() |> Map.new()
+    fallback = map_size(order)
+
+    Enum.sort_by(issues, fn issue ->
+      Map.get(order, issue.id) || Map.get(order, issue.identifier, fallback)
+    end)
+  end
+
+  defp maybe_put_page_token(body, nil), do: body
+  defp maybe_put_page_token(body, token), do: Map.put(body, "nextPageToken", token)
+
+  defp decode_search(%{"issues" => nodes} = body, assignee_filter) when is_list(nodes) do
+    endpoint = Config.settings!().tracker.endpoint
+
+    issues =
+      nodes
+      |> Enum.map(&Normalizer.normalize_issue(&1, assignee_filter, endpoint))
+      |> Enum.reject(&is_nil/1)
+
+    {:ok, issues, next_page_token(body)}
+  end
+
+  defp decode_search(%{"errorMessages" => errors}, _assignee_filter) do
+    {:error, {:jira_api_errors, errors}}
+  end
+
+  defp decode_search(_unknown, _assignee_filter), do: {:error, :jira_unknown_payload}
+
+  defp decode_comments(%{"comments" => comments}) when is_list(comments) do
+    {:ok, Enum.map(comments, &normalize_comment/1)}
+  end
+
+  defp decode_comments(%{"errorMessages" => errors}) do
+    {:error, {:jira_api_errors, errors}}
+  end
+
+  defp decode_comments(_unknown), do: {:error, :jira_unknown_comment_payload}
+
+  defp normalize_comment(%{} = comment) do
+    %{
+      "id" => comment["id"],
+      "body" => ADF.to_text(comment["body"]) || "",
+      "created_at" => comment["created"],
+      "updated_at" => comment["updated"],
+      "author" => comment_author(comment["author"])
+    }
+  end
+
+  defp comment_author(%{"displayName" => name}) when is_binary(name), do: name
+  defp comment_author(%{"name" => name}) when is_binary(name), do: name
+  defp comment_author(%{"emailAddress" => email}) when is_binary(email), do: email
+  defp comment_author(_author), do: nil
+
+  defp next_page_token(%{"isLast" => true}), do: nil
+  defp next_page_token(%{"nextPageToken" => token}) when is_binary(token) and token != "", do: token
+  defp next_page_token(_body), do: nil
+
+  # ------------------------------------------------------------------
+  # Assignee resolution
+  # ------------------------------------------------------------------
+
+  defp routing_assignee_filter(opts) do
+    case Config.settings!().tracker.assignee do
+      nil -> {:ok, nil}
+      assignee -> build_assignee_filter(assignee, opts)
+    end
+  end
+
+  defp build_assignee_filter(assignee, opts) when is_binary(assignee) do
+    case String.trim(assignee) do
+      "" -> {:ok, nil}
+      "me" -> resolve_myself_filter(opts)
+      account_id -> {:ok, %{configured_assignee: assignee, match_values: MapSet.new([account_id])}}
+    end
+  end
+
+  defp resolve_myself_filter(opts) do
+    case myself(opts) do
+      {:ok, %{"accountId" => account_id}} when is_binary(account_id) ->
+        {:ok, %{configured_assignee: "me", match_values: MapSet.new([account_id])}}
+
+      {:ok, _body} ->
+        {:error, :missing_jira_account_id}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # ------------------------------------------------------------------
+  # HTTP
+  # ------------------------------------------------------------------
+
+  defp require_config(tracker) do
+    cond do
+      is_nil(tracker.endpoint) -> {:error, :missing_jira_endpoint}
+      is_nil(tracker.api_key) -> {:error, :missing_jira_api_token}
+      is_nil(tracker.email) -> {:error, :missing_jira_email}
+      is_nil(tracker.project_slug) -> {:error, :missing_jira_project_key}
+      true -> :ok
+    end
+  end
+
+  defp request(method, path, body, opts) do
+    with {:ok, headers} <- auth_headers() do
+      url = build_url(path)
+      request_fun = Keyword.get(opts, :request_fun, &default_request/4)
+
+      case request_fun.(method, url, body, headers) do
+        {:ok, %{status: status, body: response_body}} when status in 200..299 ->
+          {:ok, response_body}
+
+        {:ok, response} ->
+          Logger.error("Jira REST #{method} #{path} failed status=#{response.status}#{error_body(response)}")
+          {:error, {:jira_api_status, response.status}}
+
+        {:error, reason} ->
+          Logger.error("Jira REST #{method} #{path} failed: #{inspect(reason)}")
+          {:error, {:jira_api_request, reason}}
+      end
+    end
+  end
+
+  defp build_url(path) do
+    Config.settings!().tracker.endpoint
+    |> String.trim_trailing("/")
+    |> Kernel.<>(path)
+  end
+
+  defp auth_headers do
+    tracker = Config.settings!().tracker
+
+    cond do
+      is_nil(tracker.api_key) ->
+        {:error, :missing_jira_api_token}
+
+      is_nil(tracker.email) ->
+        {:error, :missing_jira_email}
+
+      true ->
+        token = Base.encode64("#{tracker.email}:#{tracker.api_key}")
+
+        {:ok,
+         [
+           {"Authorization", "Basic #{token}"},
+           {"Content-Type", "application/json"},
+           {"Accept", "application/json"}
+         ]}
+    end
+  end
+
+  defp default_request(:get, url, _body, headers) do
+    Req.get(url, headers: headers, connect_options: connect_options_for(url))
+  end
+
+  defp default_request(:post, url, body, headers) do
+    Req.post(url, headers: headers, json: body, connect_options: connect_options_for(url))
+  end
+
+  defp default_request(:put, url, body, headers) do
+    Req.put(url, headers: headers, json: body, connect_options: connect_options_for(url))
+  end
+
+  defp connect_options_for(url, env \\ &System.get_env/1) do
+    case proxy_for_url(url, env) do
+      nil -> [timeout: 30_000]
+      proxy -> [timeout: 30_000, proxy: proxy]
+    end
+  end
+
+  defp proxy_for_url(url, env) when is_binary(url) do
+    uri = URI.parse(url)
+
+    if proxy_bypassed?(uri.host, env) do
+      nil
+    else
+      uri.scheme
+      |> proxy_env(env)
+      |> parse_proxy()
+    end
+  end
+
+  defp proxy_for_url(_url, _env), do: nil
+
+  defp proxy_env("https", env), do: first_env(env, ~w(HTTPS_PROXY https_proxy HTTP_PROXY http_proxy))
+  defp proxy_env("http", env), do: first_env(env, ~w(HTTP_PROXY http_proxy))
+  defp proxy_env(_scheme, _env), do: nil
+
+  defp first_env(env, names) do
+    Enum.find_value(names, fn name ->
+      case env.(name) do
+        value when is_binary(value) ->
+          value = String.trim(value)
+          if value == "", do: nil, else: value
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp parse_proxy(nil), do: nil
+
+  defp parse_proxy(value) when is_binary(value) do
+    normalized = if String.contains?(value, "://"), do: value, else: "http://" <> value
+    uri = URI.parse(normalized)
+
+    with scheme when scheme in ["http", "https"] <- uri.scheme,
+         host when is_binary(host) and host != "" <- uri.host do
+      {String.to_existing_atom(scheme), host, uri.port || default_proxy_port(scheme), []}
+    else
+      _ -> nil
+    end
+  end
+
+  defp default_proxy_port("http"), do: 80
+  defp default_proxy_port("https"), do: 443
+
+  defp proxy_bypassed?(nil, _env), do: false
+
+  defp proxy_bypassed?(host, env) when is_binary(host) do
+    no_proxy = first_env(env, ~w(NO_PROXY no_proxy))
+    host = String.downcase(host)
+
+    no_proxy
+    |> to_string()
+    |> String.split(",", trim: true)
+    |> Enum.map(&(String.trim(&1) |> String.downcase()))
+    |> Enum.any?(fn
+      "*" -> true
+      entry when entry == "" -> false
+      entry -> host == entry or String.ends_with?(host, "." <> String.trim_leading(entry, "."))
+    end)
+  end
+
+  if Mix.env() == :test do
+    def proxy_connect_options_for_test(url, env), do: connect_options_for(url, env)
+  end
+
+  defp error_body(%{body: body}) when is_binary(body) do
+    summary =
+      body
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
+
+    summary =
+      if byte_size(summary) > @max_error_body_log_bytes do
+        binary_part(summary, 0, @max_error_body_log_bytes) <> "...<truncated>"
+      else
+        summary
+      end
+
+    " body=" <> inspect(summary)
+  end
+
+  defp error_body(%{body: body}), do: " body=" <> inspect(body, limit: 20)
+  defp error_body(_response), do: ""
+end

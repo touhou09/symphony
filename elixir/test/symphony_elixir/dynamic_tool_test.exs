@@ -22,6 +22,211 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert description =~ "Linear"
   end
 
+  test "tool_specs advertises tracker tools for jira tracker" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "jira")
+
+    assert DynamicTool.tool_specs() |> Enum.map(& &1["name"]) == [
+             "tracker_get_issue",
+             "tracker_list_comments",
+             "tracker_add_comment",
+             "tracker_update_comment",
+             "tracker_transition_issue"
+           ]
+  end
+
+  test "jira tracker mode rejects linear_graphql and advertises tracker tools" do
+    response = DynamicTool.execute("linear_graphql", %{"query" => "query Viewer { viewer { id } }"}, tracker_kind: "jira")
+
+    assert response["success"] == false
+
+    assert Jason.decode!(response["output"]) == %{
+             "error" => %{
+               "message" => ~s(Unsupported dynamic tool: "linear_graphql".),
+               "supportedTools" => ["tracker_get_issue", "tracker_list_comments", "tracker_add_comment", "tracker_update_comment", "tracker_transition_issue"]
+             }
+           }
+  end
+
+  test "tracker_get_issue returns json-safe issue payload" do
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "tracker_get_issue",
+        %{"issueId" => "SYM-6"},
+        tracker_kind: "jira",
+        tracker_fetcher: fn ids ->
+          send(test_pid, {:tracker_fetcher_called, ids})
+
+          {:ok,
+           [
+             %Issue{
+               id: "10652",
+               identifier: "SYM-6",
+               title: "Implement true Codex role orchestration",
+               state: "미해결",
+               created_at: ~U[2026-06-26 15:23:40Z]
+             }
+           ]}
+        end
+      )
+
+    assert_received {:tracker_fetcher_called, ["SYM-6"]}
+    assert response["success"] == true
+
+    assert Jason.decode!(response["output"])["issue"] |> Map.take(["id", "identifier", "state", "created_at"]) == %{
+             "id" => "10652",
+             "identifier" => "SYM-6",
+             "state" => "미해결",
+             "created_at" => "2026-06-26T15:23:40Z"
+           }
+  end
+
+  test "tracker comment tools delegate list, create, update, and transitions" do
+    test_pid = self()
+
+    list_response =
+      DynamicTool.execute(
+        "tracker_list_comments",
+        %{"issueId" => "SYM-6"},
+        tracker_kind: "jira",
+        tracker_comment_lister: fn issue_id ->
+          send(test_pid, {:tracker_list_comments_called, issue_id})
+          {:ok, [%{"id" => "11381", "body" => "## Codex Workpad"}]}
+        end
+      )
+
+    comment_response =
+      DynamicTool.execute(
+        "tracker_add_comment",
+        %{"issueId" => "SYM-6", "body" => "## Codex Workpad\n\n- [ ] Start"},
+        tracker_kind: "jira",
+        tracker_commenter: fn issue_id, body ->
+          send(test_pid, {:tracker_comment_called, issue_id, body})
+          :ok
+        end
+      )
+
+    update_response =
+      DynamicTool.execute(
+        "tracker_update_comment",
+        %{"issueId" => "SYM-6", "commentId" => "11381", "body" => "## Codex Workpad\n\n- [x] Start"},
+        tracker_kind: "jira",
+        tracker_comment_updater: fn issue_id, comment_id, body ->
+          send(test_pid, {:tracker_update_comment_called, issue_id, comment_id, body})
+          :ok
+        end
+      )
+
+    transition_response =
+      DynamicTool.execute(
+        "tracker_transition_issue",
+        %{"issueId" => "SYM-6", "state" => "진행 중"},
+        tracker_kind: "jira",
+        tracker_transitioner: fn issue_id, state ->
+          send(test_pid, {:tracker_transition_called, issue_id, state})
+          :ok
+        end
+      )
+
+    assert_received {:tracker_list_comments_called, "SYM-6"}
+    assert_received {:tracker_comment_called, "SYM-6", "## Codex Workpad\n\n- [ ] Start"}
+    assert_received {:tracker_update_comment_called, "SYM-6", "11381", "## Codex Workpad\n\n- [x] Start"}
+    assert_received {:tracker_transition_called, "SYM-6", "진행 중"}
+    assert list_response["success"] == true
+    assert Jason.decode!(list_response["output"])["comments"] == [%{"body" => "## Codex Workpad", "id" => "11381"}]
+    assert comment_response["success"] == true
+    assert update_response["success"] == true
+    assert transition_response["success"] == true
+  end
+
+  test "tracker comment writes require workspace diff unless they record a runtime blocker" do
+    workspace = Path.join(System.tmp_dir!(), "dynamic-tool-no-diff-#{System.unique_integer([:positive, :monotonic])}")
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace) end)
+    assert {_output, 0} = System.cmd("git", ["init", "-q", workspace], stderr_to_stdout: true)
+
+    test_pid = self()
+
+    clean_response =
+      DynamicTool.execute(
+        "tracker_update_comment",
+        %{"issueId" => "SYM-11", "commentId" => "11388", "body" => "## Codex Workpad\n\n- [x] Planned only"},
+        tracker_kind: "jira",
+        workspace: workspace,
+        require_workspace_diff_for_tracker_comments: true,
+        tracker_comment_updater: fn issue_id, comment_id, body ->
+          send(test_pid, {:unexpected_tracker_update, issue_id, comment_id, body})
+          :ok
+        end
+      )
+
+    assert clean_response["success"] == false
+    assert Jason.decode!(clean_response["output"])["error"]["message"] =~ "blocked until the workspace"
+    refute_received {:unexpected_tracker_update, _, _, _}
+
+    blocker_response =
+      DynamicTool.execute(
+        "tracker_update_comment",
+        %{"issueId" => "SYM-11", "commentId" => "11388", "body" => "### Runtime Blocker\n\nNo safe first edit exists."},
+        tracker_kind: "jira",
+        workspace: workspace,
+        require_workspace_diff_for_tracker_comments: true,
+        tracker_comment_updater: fn issue_id, comment_id, body ->
+          send(test_pid, {:tracker_update, issue_id, comment_id, body})
+          :ok
+        end
+      )
+
+    assert blocker_response["success"] == true
+    assert_received {:tracker_update, "SYM-11", "11388", "### Runtime Blocker\n\nNo safe first edit exists."}
+
+    evidence_path = Path.join([workspace, "docs", "codex-squad-evidence.md"])
+    File.mkdir_p!(Path.dirname(evidence_path))
+    File.write!(evidence_path, "# Codex squad evidence\n")
+
+    diff_response =
+      DynamicTool.execute(
+        "tracker_add_comment",
+        %{"issueId" => "SYM-11", "body" => "## Codex Workpad\n\n- [x] Evidence file created"},
+        tracker_kind: "jira",
+        workspace: workspace,
+        require_workspace_diff_for_tracker_comments: true,
+        tracker_commenter: fn issue_id, body ->
+          send(test_pid, {:tracker_comment, issue_id, body})
+          :ok
+        end
+      )
+
+    assert diff_response["success"] == true
+    assert_received {:tracker_comment, "SYM-11", "## Codex Workpad\n\n- [x] Evidence file created"}
+  end
+
+  test "tracker comment writes remain blocked when workspace status cannot be checked" do
+    workspace = Path.join(System.tmp_dir!(), "dynamic-tool-no-diff-unknown-#{System.unique_integer([:positive, :monotonic])}")
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "tracker_update_comment",
+        %{"issueId" => "SYM-11", "commentId" => "11388", "body" => "## Codex Workpad\n\n- [x] Planned only"},
+        tracker_kind: "jira",
+        workspace: workspace,
+        require_workspace_diff_for_tracker_comments: true,
+        tracker_comment_updater: fn issue_id, comment_id, body ->
+          send(test_pid, {:unexpected_tracker_update, issue_id, comment_id, body})
+          :ok
+        end
+      )
+
+    assert response["success"] == false
+    assert Jason.decode!(response["output"])["error"]["message"] =~ "blocked until the workspace has"
+    refute_received {:unexpected_tracker_update, _, _, _}
+  end
+
   test "unsupported tools return a failure payload with the supported tool list" do
     response = DynamicTool.execute("not_a_real_tool", %{})
 

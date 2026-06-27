@@ -1,0 +1,33 @@
+services:
+  orchestrator:
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: elixir/deploy/orchestrator.Dockerfile
+    env_file:
+      - path: ${SYMPHONY_ENV_FILE:-.env}
+        required: false
+    environment:
+      HOME: /root
+      SYMPHONY_WORKSPACE_ROOT: /var/lib/symphony/workspaces
+      SYMPHONY_SOURCE_REPO: ${SYMPHONY_SOURCE_REPO:-https://github.com/touhou09/symphony}
+      SYMPHONY_SOURCE_BRANCH: ${SYMPHONY_SOURCE_BRANCH:-dev}
+      SYMPHONY_PR_REPO: ${SYMPHONY_PR_REPO:-touhou09/symphony}
+      SYMPHONY_PR_BASE: ${SYMPHONY_PR_BASE:-dev}
+    volumes:
+      - ./elixir/WORKFLOW.md:/app/elixir/WORKFLOW.md:ro
+      - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro
+      - ${HOME}/.codex/config.toml:/root/.codex/config.toml:ro
+      - ${SYMPHONY_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - symphony-workspaces:/var/lib/symphony/workspaces
+      - symphony-logs:/var/log/symphony
+    command:
+      - ./bin/symphony
+      - --i-understand-that-this-will-be-running-without-the-usual-guardrails
+      - --logs-root
+      - /var/log/symphony
+      - /app/elixir/WORKFLOW.md
+
+volumes:
+  symphony-workspaces:
+  symphony-logs:

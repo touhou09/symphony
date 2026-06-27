@@ -1,9 +1,9 @@
-.PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer e2e
+.PHONY: help all setup deps build fmt fmt-check lint squad-check test coverage ci dialyzer e2e
 
 MIX ?= mix
 
 help:
-	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, ci"
+	@echo "Targets: setup, deps, fmt, fmt-check, lint, squad-check, test, coverage, dialyzer, e2e, ci"
 
 setup:
 	$(MIX) setup
@@ -23,6 +23,9 @@ fmt-check:
 lint:
 	$(MIX) lint
 
+squad-check:
+	$(MIX) squad.check --file docs/codex-squad-evidence.example.md --workflow WORKFLOW.md
+
 coverage:
 	$(MIX) test --cover
 
@@ -41,6 +44,7 @@ ci:
 	$(MAKE) build
 	$(MAKE) fmt-check
 	$(MAKE) lint
+	$(MAKE) squad-check
 	$(MAKE) coverage
 	$(MAKE) dialyzer
 

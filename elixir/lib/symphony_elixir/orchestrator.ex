@@ -9,11 +9,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Ticket.ContentCheck
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @runtime_blocker_marker "<!-- symphony-runtime-blocker:no-diff-token-limit -->"
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -109,6 +111,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info(:run_poll_cycle, state) do
     state = refresh_runtime_config(state)
+    state = reconcile_no_diff_running_issues(state)
     state = maybe_dispatch(state)
     state = schedule_tick(state, state.poll_interval_ms)
     state = %{state | poll_check_in_progress: false}
@@ -172,8 +175,25 @@ defmodule SymphonyElixir.Orchestrator do
           |> apply_codex_token_delta(token_delta)
           |> apply_codex_rate_limits(update)
 
+        state =
+          case no_diff_token_limit_error(updated_running_entry) do
+            nil ->
+              %{state | running: Map.put(running, issue_id, updated_running_entry)}
+
+            error ->
+              Logger.warning(
+                "Issue blocked: issue_id=#{issue_id} issue_identifier=#{Map.get(updated_running_entry, :identifier, issue_id)} session_id=#{running_entry_session_id(updated_running_entry)}; #{error}"
+              )
+
+              post_runtime_blocker_comment(issue_id, updated_running_entry, error)
+
+              state
+              |> record_session_completion_totals(updated_running_entry)
+              |> stop_and_block_issue(issue_id, updated_running_entry, error)
+          end
+
         notify_dashboard()
-        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+        {:noreply, state}
     end
   end
 
@@ -198,28 +218,48 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down(:normal, state, issue_id, running_entry, session_id) do
-    if input_required_blocker?(running_entry) do
-      block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
-    else
-      Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+    case no_diff_token_limit_error(running_entry) do
+      nil ->
+        if input_required_blocker?(running_entry) do
+          block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
+        else
+          Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
-      state
-      |> complete_issue(issue_id)
-      |> schedule_issue_retry(issue_id, 1, %{
-        identifier: running_entry.identifier,
-        issue_url: running_entry.issue.url,
-        delay_type: :continuation,
-        worker_host: Map.get(running_entry, :worker_host),
-        workspace_path: Map.get(running_entry, :workspace_path)
-      })
+          state
+          |> complete_issue(issue_id)
+          |> schedule_issue_retry(issue_id, 1, %{
+            identifier: running_entry.identifier,
+            issue_url: running_entry.issue.url,
+            delay_type: :continuation,
+            worker_host: Map.get(running_entry, :worker_host),
+            workspace_path: Map.get(running_entry, :workspace_path)
+          })
+        end
+
+      error ->
+        block_no_diff_agent_down(state, issue_id, running_entry, session_id, error)
     end
   end
 
+  defp handle_agent_down({:runtime_blocker, reason}, state, issue_id, running_entry, session_id) do
+    error = if is_binary(reason), do: reason, else: "runtime blocker: #{inspect(reason)}"
+
+    Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}; #{error}")
+
+    block_no_diff_agent_down(state, issue_id, running_entry, session_id, error)
+  end
+
   defp handle_agent_down(reason, state, issue_id, running_entry, session_id) do
-    if input_required_blocker?(running_entry) do
-      block_input_required_agent_down(state, issue_id, running_entry, session_id, reason)
-    else
-      retry_agent_down(state, issue_id, running_entry, session_id, reason)
+    case no_diff_token_limit_error(running_entry) do
+      nil ->
+        if input_required_blocker?(running_entry) do
+          block_input_required_agent_down(state, issue_id, running_entry, session_id, reason)
+        else
+          retry_agent_down(state, issue_id, running_entry, session_id, reason)
+        end
+
+      error ->
+        block_no_diff_agent_down(state, issue_id, running_entry, session_id, error)
     end
   end
 
@@ -300,6 +340,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_running_issues(%State{} = state) do
+    state = reconcile_no_diff_running_issues(state)
     state = reconcile_stalled_running_issues(state)
     running_ids = Map.keys(state.running)
 
@@ -388,6 +429,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec preflight_issue_for_dispatch_for_test(Issue.t()) ::
+          :ok | {:error, [String.t()]} | {:error, {:runtime_blocker, String.t()}}
+  def preflight_issue_for_dispatch_for_test(%Issue{} = issue) do
+    preflight_issue_for_dispatch(issue)
+  end
+
+  @doc false
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
     sort_issues_for_dispatch(issues)
@@ -415,7 +463,7 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, true)
+        terminate_running_issue(state, issue.id, true, issue)
 
       !issue_routable?(issue) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
@@ -428,7 +476,7 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        terminate_running_issue(state, issue.id, false, issue)
     end
   end
 
@@ -543,7 +591,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace) do
+  defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace, completion_issue \\ nil) do
     case Map.get(state.running, issue_id) do
       nil ->
         release_issue_claim(state, issue_id)
@@ -551,12 +599,17 @@ defmodule SymphonyElixir.Orchestrator do
       %{pid: pid, ref: ref, identifier: identifier} = running_entry ->
         state = record_session_completion_totals(state, running_entry)
         worker_host = Map.get(running_entry, :worker_host)
+        workspace_path = Map.get(running_entry, :workspace_path)
+
+        stop_running_task(pid, ref)
+
+        if match?(%Issue{}, completion_issue) do
+          run_after_complete_hook(workspace_path, completion_issue, worker_host)
+        end
 
         if cleanup_workspace do
           cleanup_issue_workspace(identifier, worker_host)
         end
-
-        stop_running_task(pid, ref)
 
         %{
           state
@@ -569,6 +622,31 @@ defmodule SymphonyElixir.Orchestrator do
       _ ->
         release_issue_claim(state, issue_id)
     end
+  end
+
+  defp reconcile_no_diff_running_issues(%State{} = state) do
+    Enum.reduce(state.running, state, fn {issue_id, running_entry}, state_acc ->
+      if Map.has_key?(state_acc.blocked, issue_id) do
+        state_acc
+      else
+        case no_diff_token_limit_error(running_entry) do
+          nil ->
+            state_acc
+
+          error ->
+            identifier = Map.get(running_entry, :identifier, issue_id)
+            session_id = running_entry_session_id(running_entry)
+
+            Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id}; #{error}")
+
+            post_runtime_blocker_comment(issue_id, running_entry, error)
+
+            state_acc
+            |> record_session_completion_totals(running_entry)
+            |> stop_and_block_issue(issue_id, running_entry, error)
+        end
+      end
+    end)
   end
 
   defp reconcile_stalled_running_issues(%State{} = state) do
@@ -648,6 +726,67 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp last_activity_timestamp(_running_entry), do: nil
+
+  defp no_diff_token_limit_error(running_entry) when is_map(running_entry) do
+    limit = Config.settings!().codex.max_no_diff_tokens
+    total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
+    workspace_status = workspace_diff_status(Map.get(running_entry, :workspace_path))
+
+    cond do
+      not is_integer(limit) or limit <= 0 ->
+        nil
+
+      not is_integer(total_tokens) or total_tokens < limit ->
+        nil
+
+      workspace_status == :clean ->
+        "codex exceeded no-diff token limit: #{total_tokens} >= #{limit} and workspace has no git changes"
+
+      workspace_status == :unknown ->
+        "codex exceeded no-diff token limit: #{total_tokens} >= #{limit} and workspace is not available for verified diff checks"
+
+      true ->
+        nil
+    end
+  end
+
+  defp no_diff_token_limit_error(_running_entry), do: nil
+
+  defp workspace_diff_status(path) when is_binary(path) and path != "" do
+    status = workspace_git_status(path)
+    status
+  end
+
+  defp workspace_diff_status(_path), do: :unknown
+
+  defp workspace_git_status(path) when is_binary(path) and path != "" do
+    case System.cmd("git", ["-C", path, "status", "--porcelain=v1", "--branch"], stderr_to_stdout: true) do
+      {output, 0} -> parse_workspace_git_status(output)
+      {_output, _status} -> :unknown
+    end
+  rescue
+    _ -> :unknown
+  end
+
+  defp workspace_git_status(_path), do: :unknown
+
+  defp block_no_diff_agent_down(state, issue_id, running_entry, session_id, error) do
+    Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{Map.get(running_entry, :identifier, issue_id)} session_id=#{session_id}; #{error}")
+
+    post_runtime_blocker_comment(issue_id, running_entry, error)
+
+    block_issue_from_entry(state, issue_id, running_entry, error)
+  end
+
+  defp parse_workspace_git_status(output) when is_binary(output) do
+    lines = output |> String.split("\n", trim: true)
+
+    cond do
+      Enum.any?(lines, &(not String.starts_with?(&1, "## "))) -> :dirty
+      Enum.any?(lines, &String.contains?(&1, ["ahead", "gone"])) -> :dirty
+      true -> :clean
+    end
+  end
 
   defp input_required_blocker?(running_entry) when is_map(running_entry) do
     Map.get(running_entry, :last_codex_event) in [:turn_input_required, :approval_required] or
@@ -909,7 +1048,16 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
     case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
-        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
+        case preflight_issue_for_dispatch(refreshed_issue) do
+          :ok ->
+            do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
+
+          {:error, {:runtime_blocker, error}} ->
+            block_issue_before_dispatch(state, refreshed_issue, [error], comment?: false, error: error)
+
+          {:error, errors} ->
+            block_issue_before_dispatch(state, refreshed_issue, errors)
+        end
 
       {:skip, :missing} ->
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
@@ -1012,6 +1160,171 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
 
+  defp preflight_issue_for_dispatch(%Issue{} = issue) do
+    with :ok <- ticket_preflight_issue(issue),
+         :ok <- runtime_blocker_preflight(issue) do
+      :ok
+    end
+  end
+
+  defp ticket_preflight_issue(%Issue{} = issue) do
+    opts = Config.ticket_content_check_options()
+
+    if Config.ticket_content_preflight_enabled?() and ContentCheck.enabled?(opts) do
+      ContentCheck.validate_issue(issue, opts)
+    else
+      :ok
+    end
+  end
+
+  defp runtime_blocker_preflight(%Issue{id: issue_id}) when is_binary(issue_id) do
+    if Config.settings!().codex.max_no_diff_tokens > 0 do
+      case Tracker.list_comments(issue_id) do
+        {:ok, comments} ->
+          if Enum.any?(comments, &(comment_body(&1) |> String.contains?(@runtime_blocker_marker))) do
+            {:error, {:runtime_blocker, "runtime blocker persisted on tracker workpad: no-diff token limit"}}
+          else
+            :ok
+          end
+
+        {:error, reason} ->
+          Logger.debug("Unable to inspect runtime blocker comments for issue_id=#{issue_id}: #{inspect(reason)}")
+          :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp runtime_blocker_preflight(_issue), do: :ok
+
+  defp block_issue_before_dispatch(state, issue, errors, opts \\ [])
+
+  defp block_issue_before_dispatch(%State{} = state, %Issue{id: issue_id} = issue, errors, opts)
+       when is_binary(issue_id) and is_list(errors) do
+    error =
+      case Keyword.get(opts, :error) do
+        message when is_binary(message) -> message
+        _ -> "ticket preflight failed: #{ContentCheck.format_errors(errors)}"
+      end
+
+    if Keyword.get(opts, :comment?, true) do
+      post_ticket_preflight_blocker_comment(issue, errors)
+    end
+
+    blocked_entry = %{
+      issue_id: issue_id,
+      identifier: issue.identifier || issue_id,
+      issue: issue,
+      worker_host: nil,
+      workspace_path: nil,
+      session_id: nil,
+      error: error,
+      blocked_at: DateTime.utc_now(),
+      last_codex_message: nil,
+      last_codex_event: nil,
+      last_codex_timestamp: nil
+    }
+
+    Logger.warning("Blocking dispatch for #{issue_context(issue)}: #{error}")
+
+    %{
+      state
+      | claimed: MapSet.put(state.claimed, issue_id),
+        blocked: Map.put(state.blocked, issue_id, blocked_entry),
+        retry_attempts: Map.delete(state.retry_attempts, issue_id)
+    }
+  end
+
+  defp block_issue_before_dispatch(%State{} = state, _issue, _errors, _opts), do: state
+
+  defp post_runtime_blocker_comment(issue_id, running_entry, error) when is_binary(issue_id) do
+    body = runtime_blocker_body(running_entry, error)
+
+    case Tracker.list_comments(issue_id) do
+      {:ok, comments} ->
+        case find_workpad_comment(comments) do
+          nil -> create_runtime_blocker_comment(issue_id, body)
+          comment -> update_runtime_blocker_comment(issue_id, comment, body)
+        end
+
+      {:error, reason} ->
+        Logger.warning("Unable to list comments for runtime blocker issue_id=#{issue_id}: #{inspect(reason)}")
+        create_runtime_blocker_comment(issue_id, body)
+    end
+  end
+
+  defp post_runtime_blocker_comment(_issue_id, _running_entry, _error), do: :ok
+
+  defp find_workpad_comment(comments) when is_list(comments) do
+    Enum.find(comments, fn comment ->
+      comment
+      |> comment_body()
+      |> String.contains?("## Codex Workpad")
+    end)
+  end
+
+  defp update_runtime_blocker_comment(issue_id, comment, blocker_body) do
+    comment_id = comment_id(comment)
+    body = comment_body(comment)
+
+    cond do
+      is_nil(comment_id) ->
+        create_runtime_blocker_comment(issue_id, blocker_body)
+
+      String.contains?(body, @runtime_blocker_marker) ->
+        :ok
+
+      true ->
+        updated_body = String.trim_trailing(body) <> "\n\n" <> blocker_body
+
+        case Tracker.update_comment(issue_id, comment_id, updated_body) do
+          :ok -> :ok
+          {:error, reason} -> Logger.warning("Unable to update runtime blocker comment for issue_id=#{issue_id}: #{inspect(reason)}")
+        end
+    end
+  end
+
+  defp create_runtime_blocker_comment(issue_id, body) do
+    case Tracker.create_comment(issue_id, body) do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("Unable to create runtime blocker comment for issue_id=#{issue_id}: #{inspect(reason)}")
+    end
+  end
+
+  defp runtime_blocker_body(running_entry, error) do
+    tokens = Map.get(running_entry, :codex_total_tokens, 0)
+    workspace = Map.get(running_entry, :workspace_path) || "unknown"
+    timestamp = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    """
+    #{@runtime_blocker_marker}
+    ### Runtime Blocker
+
+    - Type: no-diff token limit
+    - Error: #{error}
+    - Tokens: #{tokens}
+    - Workspace: #{workspace}
+    - At: #{timestamp}
+    """
+    |> String.trim()
+  end
+
+  defp comment_body(%{"body" => body}) when is_binary(body), do: body
+  defp comment_body(%{body: body}) when is_binary(body), do: body
+  defp comment_body(_comment), do: ""
+
+  defp comment_id(%{"id" => id}) when is_binary(id), do: id
+  defp comment_id(%{id: id}) when is_binary(id), do: id
+  defp comment_id(_comment), do: nil
+
+  defp post_ticket_preflight_blocker_comment(%Issue{id: issue_id} = issue, errors) when is_binary(issue_id) do
+    case Tracker.create_comment(issue_id, ContentCheck.blocker_comment(issue, errors)) do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("Unable to write ticket preflight blocker comment for #{issue_context(issue)}: #{inspect(reason)}")
+    end
+  end
+
   defp complete_issue(%State{} = state, issue_id) do
     %{
       state
@@ -1106,6 +1419,7 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
+        run_after_complete_hook(metadata[:workspace_path], issue, metadata[:worker_host])
         cleanup_issue_workspace(issue.identifier, metadata[:worker_host])
         {:noreply, release_issue_claim(state, issue_id)}
 
@@ -1114,6 +1428,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       true ->
         Logger.debug("Issue left active states, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}")
+        run_after_complete_hook(metadata[:workspace_path], issue, metadata[:worker_host])
 
         {:noreply, release_issue_claim(state, issue_id)}
     end
@@ -1131,6 +1446,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp cleanup_issue_workspace(_identifier, _worker_host), do: :ok
+
+  defp run_after_complete_hook(workspace, issue, worker_host) when is_binary(workspace) do
+    Workspace.run_after_complete_hook(workspace, issue, worker_host)
+  end
+
+  defp run_after_complete_hook(_workspace, _issue, _worker_host), do: :ok
 
   defp blocked_issue_worker_host(%State{} = state, issue_id) do
     state.blocked

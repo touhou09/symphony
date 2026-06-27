@@ -15,6 +15,34 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  @list_comments_query """
+  query SymphonyListComments($issueId: String!) {
+    issue(id: $issueId) {
+      comments(first: 100) {
+        nodes {
+          id
+          body
+          createdAt
+          updatedAt
+          user {
+            name
+            displayName
+            email
+          }
+        }
+      }
+    }
+  }
+  """
+
+  @update_comment_mutation """
+  mutation SymphonyUpdateComment($commentId: String!, $body: String!) {
+    commentUpdate(id: $commentId, input: {body: $body}) {
+      success
+    }
+  }
+  """
+
   @update_state_mutation """
   mutation SymphonyUpdateIssueState($issueId: String!, $stateId: String!) {
     issueUpdate(id: $issueId, input: {stateId: $stateId}) {
@@ -46,6 +74,17 @@ defmodule SymphonyElixir.Linear.Adapter do
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids), do: client_module().fetch_issue_states_by_ids(issue_ids)
 
+  @spec list_comments(String.t()) :: {:ok, [map()]} | {:error, term()}
+  def list_comments(issue_id) when is_binary(issue_id) do
+    with {:ok, response} <- client_module().graphql(@list_comments_query, %{issueId: issue_id}),
+         nodes when is_list(nodes) <- get_in(response, ["data", "issue", "comments", "nodes"]) do
+      {:ok, Enum.map(nodes, &normalize_comment/1)}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :comments_not_found}
+    end
+  end
+
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) when is_binary(issue_id) and is_binary(body) do
     with {:ok, response} <- client_module().graphql(@create_comment_mutation, %{issueId: issue_id, body: body}),
@@ -55,6 +94,18 @@ defmodule SymphonyElixir.Linear.Adapter do
       false -> {:error, :comment_create_failed}
       {:error, reason} -> {:error, reason}
       _ -> {:error, :comment_create_failed}
+    end
+  end
+
+  @spec update_comment(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def update_comment(_issue_id, comment_id, body) when is_binary(comment_id) and is_binary(body) do
+    with {:ok, response} <- client_module().graphql(@update_comment_mutation, %{commentId: comment_id, body: body}),
+         true <- get_in(response, ["data", "commentUpdate", "success"]) == true do
+      :ok
+    else
+      false -> {:error, :comment_update_failed}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :comment_update_failed}
     end
   end
 
@@ -76,6 +127,21 @@ defmodule SymphonyElixir.Linear.Adapter do
   defp client_module do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)
   end
+
+  defp normalize_comment(%{} = comment) do
+    %{
+      "id" => comment["id"],
+      "body" => comment["body"] || "",
+      "created_at" => comment["createdAt"],
+      "updated_at" => comment["updatedAt"],
+      "author" => comment_author(comment["user"])
+    }
+  end
+
+  defp comment_author(%{"displayName" => name}) when is_binary(name), do: name
+  defp comment_author(%{"name" => name}) when is_binary(name), do: name
+  defp comment_author(%{"email" => email}) when is_binary(email), do: email
+  defp comment_author(_user), do: nil
 
   defp resolve_state_id(issue_id, state_name) do
     with {:ok, response} <-

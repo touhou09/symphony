@@ -1,0 +1,9 @@
+.git
+.github
+**/_build
+**/deps
+**/.elixir_ls
+**/log
+**/tmp
+**/.DS_Store
+llm-wiki

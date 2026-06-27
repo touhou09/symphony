@@ -5,9 +5,25 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
+  alias SymphonyElixir.Squad.EvidenceCheck
   alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
+
+  @squad_evidence_path "docs/codex-squad-evidence.md"
+
+  @doc false
+  @spec squad_codex_command_for_test(String.t(), String.t()) :: String.t()
+  def squad_codex_command_for_test(command, model) when is_binary(command) and is_binary(model) do
+    codex_command_for_model(command, model)
+  end
+
+  @doc false
+  @spec squad_role_prompt_for_test(Issue.t(), String.t(), String.t(), pos_integer(), pos_integer()) :: String.t()
+  def squad_role_prompt_for_test(%Issue{} = issue, role, model, role_number, total_roles)
+      when is_binary(role) and is_binary(model) and is_integer(role_number) and is_integer(total_roles) do
+    build_squad_role_prompt(issue, [], role, model, role_number, total_roles)
+  end
 
   @doc false
   @spec continue_with_issue_for_test(Issue.t(), ([String.t()] -> term())) ::
@@ -27,6 +43,10 @@ defmodule SymphonyElixir.AgentRunner do
     case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
       :ok ->
         :ok
+
+      {:error, {:runtime_blocker, _} = reason} ->
+        Logger.error("Agent run blocked for #{issue_context(issue)}: #{inspect(reason)}")
+        exit(reason)
 
       {:error, reason} ->
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
@@ -85,6 +105,14 @@ defmodule SymphonyElixir.AgentRunner do
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+    if Config.settings!().agent.squad_enabled do
+      run_squad_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+    else
+      run_single_agent_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+    end
+  end
+
+  defp run_single_agent_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
@@ -94,6 +122,65 @@ defmodule SymphonyElixir.AgentRunner do
       after
         AppServer.stop_session(session)
       end
+    end
+  end
+
+  defp run_squad_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+    settings = Config.settings!()
+    roles = squad_roles(settings)
+    total_roles = length(roles)
+
+    roles
+    |> Enum.with_index(1)
+    |> Enum.reduce_while(:ok, fn {{role, model}, role_number}, :ok ->
+      prompt = build_squad_role_prompt(issue, opts, role, model, role_number, total_roles)
+      command = codex_command_for_model(settings.codex.command, model)
+      implementer_before_change_state = if role == "implementer", do: workspace_change_state(workspace), else: :skip
+
+      case AppServer.start_session(workspace, worker_host: worker_host, codex_command: command) do
+        {:ok, session} ->
+          try do
+            case AppServer.run_turn(
+                   session,
+                   prompt,
+                   issue,
+                   on_message: codex_message_handler(codex_update_recipient, issue)
+                 ) do
+              {:ok, turn_session} ->
+                role_progress_result =
+                  if role == "implementer" do
+                    verify_implementer_turn_progress(implementer_before_change_state, workspace)
+                  else
+                    :ok
+                  end
+
+                case role_progress_result do
+                  :ok ->
+                    Logger.info(
+                      "Completed squad role for #{issue_context(issue)} role=#{role} model=#{model} session_id=#{turn_session[:session_id]} workspace=#{workspace} role_turn=#{role_number}/#{total_roles}"
+                    )
+
+                    {:cont, :ok}
+
+                  {:error, reason} ->
+                    Logger.warning("Implementer role blocked early for #{issue_context(issue)}: #{reason}")
+                    {:halt, {:error, {:runtime_blocker, reason}}}
+                end
+
+              {:error, reason} ->
+                {:halt, {:error, {:squad_role_failed, role, reason}}}
+            end
+          after
+            AppServer.stop_session(session)
+          end
+
+        {:error, reason} ->
+          {:halt, {:error, {:squad_role_start_failed, role, reason}}}
+      end
+    end)
+    |> case do
+      :ok -> validate_squad_evidence(workspace)
+      {:error, _reason} = error -> error
     end
   end
 
@@ -136,6 +223,179 @@ defmodule SymphonyElixir.AgentRunner do
           {:error, reason}
       end
     end
+  end
+
+  defp build_squad_role_prompt(issue, opts, role, model, role_number, total_roles) do
+    base_prompt = PromptBuilder.build_prompt(issue, opts)
+
+    """
+    #{base_prompt}
+
+    ## Symphony squad role turn
+
+    Role: #{role}
+    Model: #{model}
+    Role turn: #{role_number}/#{total_roles}
+    Evidence file: #{@squad_evidence_path}
+
+    Run this role as a separate Codex squad context. Keep all durable handoff evidence in `#{@squad_evidence_path}`.
+
+    Role contract:
+    - Before any tracker comment/write tool call, create or update a workspace file so `git status --short` is non-empty. The preferred first edit is `#{@squad_evidence_path}`.
+    - `cto`: first create or refresh `#{@squad_evidence_path}` with `## Scope` and `## CTO Plan`; define bounded implementation and validation criteria.
+    - `implementer`: first create a failing/regression test or the smallest code/docs edit in the workspace (excluding `#{@squad_evidence_path}`), then implement the scoped changes and write `## Implementation` with role/model/result. The first edit path must be explicit and verifiable in evidence.
+    - verifier roles: first append a verification note to `#{@squad_evidence_path}`, inspect the diff and evidence, run targeted validation, then add a `## Verification` checklist row exactly containing the verifier role, configured model, and `PASS` or `FAIL`.
+
+    No-diff contract:
+    - Tracker workpad-only progress is not implementation progress. If no safe first file edit exists, write a `### Runtime Blocker` comment with the concrete blocker and stop before extended analysis.
+    - Run `git status --short` before tracker workpad updates. A normal workpad update is allowed only after the workspace has a code, test, docs, or evidence diff.
+
+    Completion contract:
+    - Do not mark the issue successful unless `mix squad.check --file #{@squad_evidence_path} --workflow WORKFLOW.md` passes.
+    - If this role cannot complete, update the tracker workpad with the concrete blocker and stop instead of guessing.
+    """
+  end
+
+  defp verify_implementer_turn_progress(:skip, _workspace), do: :ok
+
+  defp verify_implementer_turn_progress(:unknown, _workspace),
+    do: {:error, "workspace status could not be verified for implementer change checks"}
+
+  defp verify_implementer_turn_progress(:error, _workspace),
+    do: {:error, "workspace status could not be verified for implementer change checks"}
+
+  defp verify_implementer_turn_progress(pre_state, workspace) when is_map(pre_state) and is_binary(workspace) do
+    post_state = workspace_change_state(workspace)
+
+    case post_state do
+      :unknown ->
+        {:error, "workspace status could not be verified for implementer change checks"}
+
+      post_state when is_map(post_state) ->
+        if implements_scoped_workspace_progress?(pre_state, post_state) do
+          :ok
+        else
+          {:error, "implementer must make a workspace edit outside #{@squad_evidence_path} before tracker progress updates"}
+        end
+    end
+  end
+
+  defp implements_scoped_workspace_progress?(pre_state, post_state)
+       when is_map(pre_state) and is_map(post_state) do
+    Enum.any?(post_state, fn {path, post_signature} ->
+      path != @squad_evidence_path and Map.get(pre_state, path) != post_signature
+    end) or
+      Enum.any?(pre_state, fn {path, pre_signature} ->
+        path != @squad_evidence_path and Map.get(post_state, path) != pre_signature
+      end)
+  end
+
+  defp implements_scoped_workspace_progress?(_pre_state, _post_state), do: false
+
+  defp workspace_change_state(workspace) when is_binary(workspace) and workspace != "" do
+    case workspace_status_map(workspace) do
+      :unknown -> :unknown
+      entries -> entries
+    end
+  end
+
+  defp workspace_change_state(_workspace), do: :unknown
+
+  defp workspace_status_map(path) do
+    case System.cmd("git", ["-C", path, "status", "--porcelain=v1", "--branch", "-uall"], stderr_to_stdout: true) do
+      {output, 0} ->
+        parse_workspace_change_map(path, output)
+
+      {_output, _status} ->
+        :unknown
+    end
+  rescue
+    _ -> :unknown
+  end
+
+  defp parse_workspace_change_map(workspace, output) when is_binary(workspace) and is_binary(output) do
+    output
+    |> String.split("\n", trim: true)
+    |> Enum.reject(&String.starts_with?(&1, "## "))
+    |> Enum.map(&trim_workspace_status_path/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.reduce(%{}, fn path, acc ->
+      Map.put(acc, path, workspace_entry_signature(Path.join(workspace, path)))
+    end)
+  end
+
+  defp trim_workspace_status_path(line) when is_binary(line) do
+    if String.starts_with?(line, "?? ") or String.starts_with?(line, "R") do
+      case String.split(line, " -> ") do
+        [_from, to] -> String.trim(to)
+        _ -> String.slice(line, 3..-1//1) |> String.trim()
+      end
+    else
+      String.slice(line, 3..-1//1)
+      |> String.trim()
+    end
+  end
+
+  defp trim_workspace_status_path(_line), do: ""
+
+  defp workspace_entry_signature(path) when is_binary(path) do
+    if File.exists?(path) do
+      case File.stat(path, time: :posix) do
+        {:ok, %File.Stat{type: :regular}} -> file_content_signature(path)
+        {:ok, %File.Stat{type: type, size: size}} -> {type, size}
+        {:error, _reason} -> :unknown
+      end
+    else
+      :missing
+    end
+  end
+
+  defp workspace_entry_signature(_path), do: :unknown
+
+  defp file_content_signature(path) do
+    case File.read(path) do
+      {:ok, contents} -> {:sha256, :crypto.hash(:sha256, contents)}
+      {:error, _reason} -> :unknown
+    end
+  end
+
+  @doc false
+  def workspace_change_state_for_test(path), do: workspace_change_state(path)
+
+  @doc false
+  def implements_scoped_workspace_progress_for_test(pre_state, post_state),
+    do: implements_scoped_workspace_progress?(pre_state, post_state)
+
+  defp squad_roles(settings) do
+    model_roles = settings.agent.model_roles
+
+    ["cto", "implementer" | settings.agent.required_verifiers]
+    |> Enum.uniq()
+    |> Enum.map(fn role -> {role, Map.fetch!(model_roles, role)} end)
+  end
+
+  defp validate_squad_evidence(workspace) do
+    evidence_path = Path.join(workspace, @squad_evidence_path)
+
+    case EvidenceCheck.validate_file(evidence_path, Config.squad_prompt_context()) do
+      :ok -> :ok
+      {:error, errors} -> {:error, {:squad_evidence_failed, errors}}
+    end
+  end
+
+  defp codex_command_for_model(command, model) when is_binary(command) and is_binary(model) do
+    config_arg = "--config " <> shell_quote("model=#{inspect(model)}")
+    trimmed = String.trim(command)
+
+    if Regex.match?(~r/\bapp-server\s*$/, trimmed) do
+      Regex.replace(~r/\s+app-server\s*$/, trimmed, " #{config_arg} app-server")
+    else
+      trimmed <> " " <> config_arg
+    end
+  end
+
+  defp shell_quote(value) when is_binary(value) do
+    "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
   end
 
   defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)

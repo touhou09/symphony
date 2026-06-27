@@ -43,6 +43,7 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :server_port_override)
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+          Application.delete_env(:symphony_elixir, :memory_tracker_comments)
           File.rm_rf(workflow_root)
         end)
 
@@ -94,6 +95,7 @@ defmodule SymphonyElixir.TestSupport do
         [
           tracker_kind: "linear",
           tracker_endpoint: "https://api.linear.app/graphql",
+          tracker_email: nil,
           tracker_api_token: "token",
           tracker_project_slug: "project",
           tracker_assignee: nil,
@@ -104,10 +106,22 @@ defmodule SymphonyElixir.TestSupport do
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
+          ticket_block_dispatch_on_invalid_ticket: false,
+          ticket_required_description_sections: [],
+          ticket_require_acceptance_checkboxes: false,
+          ticket_require_validation_checkboxes: false,
           max_concurrent_agents: 10,
           max_turns: 20,
           max_retry_backoff_ms: 300_000,
+          squad_enabled: false,
           max_concurrent_agents_by_state: %{},
+          agent_model_roles: %{
+            cto: "gpt-5.5",
+            implementer: "gpt-5.3-codex-spark",
+            verifier: "gpt-5.4",
+            final_verifier: "gpt-5.5"
+          },
+          agent_required_verifiers: ["verifier", "final_verifier"],
           codex_command: "codex app-server",
           codex_approval_policy: %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}},
           codex_thread_sandbox: "workspace-write",
@@ -115,9 +129,11 @@ defmodule SymphonyElixir.TestSupport do
           codex_turn_timeout_ms: 3_600_000,
           codex_read_timeout_ms: 5_000,
           codex_stall_timeout_ms: 300_000,
+          codex_max_no_diff_tokens: 0,
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
+          hook_after_complete: nil,
           hook_before_remove: nil,
           hook_timeout_ms: 60_000,
           observability_enabled: true,
@@ -133,19 +149,29 @@ defmodule SymphonyElixir.TestSupport do
     tracker_kind = Keyword.get(config, :tracker_kind)
     tracker_endpoint = Keyword.get(config, :tracker_endpoint)
     tracker_api_token = Keyword.get(config, :tracker_api_token)
+    tracker_email = Keyword.get(config, :tracker_email)
     tracker_project_slug = Keyword.get(config, :tracker_project_slug)
     tracker_assignee = Keyword.get(config, :tracker_assignee)
     tracker_required_labels = Keyword.get(config, :tracker_required_labels)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
+    tracker_active_status_ids = Keyword.get(config, :tracker_active_status_ids)
+    tracker_terminal_status_ids = Keyword.get(config, :tracker_terminal_status_ids)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
     workspace_root = Keyword.get(config, :workspace_root)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
+    ticket_block_dispatch_on_invalid_ticket = Keyword.get(config, :ticket_block_dispatch_on_invalid_ticket)
+    ticket_required_description_sections = Keyword.get(config, :ticket_required_description_sections)
+    ticket_require_acceptance_checkboxes = Keyword.get(config, :ticket_require_acceptance_checkboxes)
+    ticket_require_validation_checkboxes = Keyword.get(config, :ticket_require_validation_checkboxes)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
+    squad_enabled = Keyword.get(config, :squad_enabled)
     max_concurrent_agents_by_state = Keyword.get(config, :max_concurrent_agents_by_state)
+    agent_model_roles = Keyword.get(config, :agent_model_roles)
+    agent_required_verifiers = Keyword.get(config, :agent_required_verifiers)
     codex_command = Keyword.get(config, :codex_command)
     codex_approval_policy = Keyword.get(config, :codex_approval_policy)
     codex_thread_sandbox = Keyword.get(config, :codex_thread_sandbox)
@@ -153,9 +179,11 @@ defmodule SymphonyElixir.TestSupport do
     codex_turn_timeout_ms = Keyword.get(config, :codex_turn_timeout_ms)
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
+    codex_max_no_diff_tokens = Keyword.get(config, :codex_max_no_diff_tokens)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
+    hook_after_complete = Keyword.get(config, :hook_after_complete)
     hook_before_remove = Keyword.get(config, :hook_before_remove)
     hook_timeout_ms = Keyword.get(config, :hook_timeout_ms)
     observability_enabled = Keyword.get(config, :observability_enabled)
@@ -172,21 +200,33 @@ defmodule SymphonyElixir.TestSupport do
         "  kind: #{yaml_value(tracker_kind)}",
         "  endpoint: #{yaml_value(tracker_endpoint)}",
         "  api_key: #{yaml_value(tracker_api_token)}",
+        "  email: #{yaml_value(tracker_email)}",
         "  project_slug: #{yaml_value(tracker_project_slug)}",
         "  assignee: #{yaml_value(tracker_assignee)}",
         "  required_labels: #{yaml_value(tracker_required_labels)}",
         "  active_states: #{yaml_value(tracker_active_states)}",
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
+        "  active_status_ids: #{yaml_value(tracker_active_status_ids)}",
+        "  terminal_status_ids: #{yaml_value(tracker_terminal_status_ids)}",
         "polling:",
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
         worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
+        ticket_yaml(
+          ticket_block_dispatch_on_invalid_ticket,
+          ticket_required_description_sections,
+          ticket_require_acceptance_checkboxes,
+          ticket_require_validation_checkboxes
+        ),
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
         "  max_turns: #{yaml_value(max_turns)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
+        "  squad_enabled: #{yaml_value(squad_enabled)}",
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
+        "  model_roles: #{yaml_value(agent_model_roles)}",
+        "  required_verifiers: #{yaml_value(agent_required_verifiers)}",
         "codex:",
         "  command: #{yaml_value(codex_command)}",
         "  approval_policy: #{yaml_value(codex_approval_policy)}",
@@ -195,7 +235,8 @@ defmodule SymphonyElixir.TestSupport do
         "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
-        hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
+        "  max_no_diff_tokens: #{yaml_value(codex_max_no_diff_tokens)}",
+        hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_after_complete, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
         "---",
@@ -228,15 +269,16 @@ defmodule SymphonyElixir.TestSupport do
 
   defp yaml_value(value), do: yaml_value(to_string(value))
 
-  defp hooks_yaml(nil, nil, nil, nil, timeout_ms), do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
+  defp hooks_yaml(nil, nil, nil, nil, nil, timeout_ms), do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
 
-  defp hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, timeout_ms) do
+  defp hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_after_complete, hook_before_remove, timeout_ms) do
     [
       "hooks:",
       "  timeout_ms: #{yaml_value(timeout_ms)}",
       hook_entry("after_create", hook_after_create),
       hook_entry("before_run", hook_before_run),
       hook_entry("after_run", hook_after_run),
+      hook_entry("after_complete", hook_after_complete),
       hook_entry("before_remove", hook_before_remove)
     ]
     |> Enum.reject(&is_nil/1)
@@ -255,6 +297,19 @@ defmodule SymphonyElixir.TestSupport do
         "  max_concurrent_agents_per_host: #{yaml_value(max_concurrent_agents_per_host)}"
     ]
     |> Enum.reject(&(&1 in [nil, false]))
+    |> Enum.join("\n")
+  end
+
+  defp ticket_yaml(false, [], false, false), do: nil
+
+  defp ticket_yaml(block_dispatch, required_sections, require_acceptance, require_validation) do
+    [
+      "ticket:",
+      "  block_dispatch_on_invalid_ticket: #{yaml_value(block_dispatch)}",
+      "  required_description_sections: #{yaml_value(required_sections)}",
+      "  require_acceptance_checkboxes: #{yaml_value(require_acceptance)}",
+      "  require_validation_checkboxes: #{yaml_value(require_validation)}"
+    ]
     |> Enum.join("\n")
   end
 
