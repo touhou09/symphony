@@ -136,6 +136,6 @@
 ## 2026-06-27: Main/dev branch flow [done]
 - **What**: Collapsed the fork branch model to `main` and `dev`, with Compose/workflow defaults cloning `touhou09/symphony` from `dev` and publishing completed work back to `dev`.
 - **Why**: Symphony needs one predictable development lane: work accumulates on `dev`, then review/merge moves the integrated result to `main`.
-- **Impact**: New unattended workspaces and completion PRs now target the fork's `dev` branch by default instead of the deleted feature branch.
-- **Test**: Branch listing confirmed only `origin/main` and `origin/dev` on the fork; dev-to-main PR and deployment checks are the release gate for this flow.
+- **Impact**: New unattended workspaces and completion PRs now target the fork's `dev` branch by default instead of the deleted feature branch; PR #4 merged the dev lane into `main`.
+- **Test**: Branch listing confirmed only `origin/main` and `origin/dev` on the fork; `mix format` and targeted ExUnit 65/65 passed; Docker build/up succeeded; container env reports `touhou09/symphony`, `dev`, and PR base `dev`.
 ---
