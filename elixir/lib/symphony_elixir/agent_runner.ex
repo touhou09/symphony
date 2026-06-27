@@ -361,9 +361,11 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   @doc false
+  @spec workspace_change_state_for_test(Path.t()) :: map() | :unknown
   def workspace_change_state_for_test(path), do: workspace_change_state(path)
 
   @doc false
+  @spec implements_scoped_workspace_progress_for_test(map() | term(), map() | term()) :: boolean()
   def implements_scoped_workspace_progress_for_test(pre_state, post_state),
     do: implements_scoped_workspace_progress?(pre_state, post_state)
 
