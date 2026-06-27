@@ -84,10 +84,7 @@ defmodule SymphonyElixir.Ticket.ContentCheck do
   def blocker_comment(%Issue{} = issue, errors) when is_list(errors) do
     identifier = issue.identifier || issue.id || "ticket"
 
-    body =
-      errors
-      |> Enum.map(&"- #{&1}")
-      |> Enum.join("\n")
+    body = Enum.map_join(errors, "\n", &"- #{&1}")
 
     """
     ## Symphony Ticket Preflight Blocker

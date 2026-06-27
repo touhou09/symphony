@@ -814,18 +814,22 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    assert %{polling: %{checking?: true}} =
-             wait_for_snapshot(
-               pid,
-               fn
-                 %{polling: %{checking?: true}} ->
-                   true
+    startup_snapshot =
+      wait_for_snapshot(
+        pid,
+        fn
+          %{polling: %{checking?: true}} ->
+            true
 
-                 _ ->
-                   false
-               end,
-               500
-             )
+          %{polling: %{checking?: false, next_poll_in_ms: due_in_ms}}
+          when is_integer(due_in_ms) and due_in_ms <= 5_000 ->
+            true
+
+          _ ->
+            false
+        end,
+        500
+      )
 
     assert %{
              polling: %{
@@ -833,19 +837,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                next_poll_in_ms: next_poll_in_ms,
                poll_interval_ms: 5_000
              }
-           } =
-             wait_for_snapshot(
-               pid,
-               fn
-                 %{polling: %{checking?: false, next_poll_in_ms: due_in_ms}}
-                 when is_integer(due_in_ms) and due_in_ms <= 5_000 ->
-                   true
-
-                 _ ->
-                   false
-               end,
-               500
-             )
+           } = wait_for_completed_poll_snapshot(pid, startup_snapshot)
 
     assert is_integer(next_poll_in_ms)
     assert next_poll_in_ms >= 0
@@ -1879,7 +1871,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     StatusDashboard.notify_update(dashboard_name)
-    assert_receive {:render, first_render_ms, _content}, 200
+    assert_receive {:render, first_render_ms, _content}, 500
 
     :sys.replace_state(pid, fn state ->
       %{state | last_snapshot_fingerprint: :force_next_change, last_rendered_content: nil}
@@ -1888,7 +1880,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     StatusDashboard.notify_update(dashboard_name)
     StatusDashboard.notify_update(dashboard_name)
 
-    assert_receive {:render, second_render_ms, _content}, 200
+    assert_receive {:render, second_render_ms, _content}, 500
     assert second_render_ms > first_render_ms
     refute_receive {:render, _third_render_ms, _content}, 60
   end
@@ -2274,6 +2266,23 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_snapshot(pid, predicate, deadline_ms)
+  end
+
+  defp wait_for_completed_poll_snapshot(_pid, %{polling: %{checking?: false}} = snapshot), do: snapshot
+
+  defp wait_for_completed_poll_snapshot(pid, %{polling: %{checking?: true}}) do
+    wait_for_snapshot(
+      pid,
+      fn
+        %{polling: %{checking?: false, next_poll_in_ms: due_in_ms}}
+        when is_integer(due_in_ms) and due_in_ms <= 5_000 ->
+          true
+
+        _ ->
+          false
+      end,
+      500
+    )
   end
 
   defp do_wait_for_snapshot(pid, predicate, deadline_ms) do

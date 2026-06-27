@@ -406,13 +406,17 @@ defmodule Mix.Tasks.Workspace.PublishPr do
     |> Enum.find_value(fn key ->
       case System.get_env(key) do
         value when is_binary(value) ->
-          value = String.trim(value)
-          if value == "", do: nil, else: value
+          non_empty_trimmed(value)
 
         _ ->
           nil
       end
     end)
+  end
+
+  defp non_empty_trimmed(value) do
+    value = String.trim(value)
+    if value == "", do: nil, else: value
   end
 
   defp gh_available? do

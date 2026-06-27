@@ -502,14 +502,14 @@ defmodule SymphonyElixir.Config.Schema do
         |> get_field(roles_field, %{})
         |> normalize_model_roles()
 
-      Enum.flat_map(verifiers, fn verifier ->
-        if Map.has_key?(roles, verifier) do
-          []
-        else
-          [{verifiers_field, "verifier #{inspect(verifier)} must exist in model_roles"}]
-        end
-      end)
+      verifiers
+      |> Enum.reject(&Map.has_key?(roles, &1))
+      |> Enum.map(&missing_required_verifier_error(&1, verifiers_field))
     end)
+  end
+
+  defp missing_required_verifier_error(verifier, verifiers_field) do
+    {verifiers_field, "verifier #{inspect(verifier)} must exist in model_roles"}
   end
 
   defp changeset(attrs) do

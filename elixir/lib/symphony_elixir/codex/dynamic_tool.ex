@@ -316,7 +316,8 @@ defmodule SymphonyElixir.Codex.DynamicTool do
 
   defp normalize_tracker_comment_arguments(arguments) when is_map(arguments) do
     with {:ok, issue_id} <- normalize_issue_id(arguments),
-         {:ok, body} <- normalize_text_argument(arguments, ["body", "comment", "text", :body, :comment, :text], :missing_comment_body) do
+         {:ok, body} <-
+           normalize_text_argument(arguments, ["body", "comment", "text", :body, :comment, :text], :missing_comment_body) do
       {:ok, issue_id, body}
     end
   end
@@ -326,7 +327,8 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   defp normalize_tracker_update_comment_arguments(arguments) when is_map(arguments) do
     with {:ok, issue_id} <- normalize_issue_id(arguments),
          {:ok, comment_id} <- normalize_comment_id(arguments),
-         {:ok, body} <- normalize_text_argument(arguments, ["body", "comment", "text", :body, :comment, :text], :missing_comment_body) do
+         {:ok, body} <-
+           normalize_text_argument(arguments, ["body", "comment", "text", :body, :comment, :text], :missing_comment_body) do
       {:ok, issue_id, comment_id, body}
     end
   end
@@ -335,7 +337,12 @@ defmodule SymphonyElixir.Codex.DynamicTool do
 
   defp normalize_tracker_transition_arguments(arguments) when is_map(arguments) do
     with {:ok, issue_id} <- normalize_issue_id(arguments),
-         {:ok, state_name} <- normalize_text_argument(arguments, ["state", "status", "targetState", :state, :status, :target_state], :missing_target_state) do
+         {:ok, state_name} <-
+           normalize_text_argument(
+             arguments,
+             ["state", "status", "targetState", :state, :status, :target_state],
+             :missing_target_state
+           ) do
       {:ok, issue_id, state_name}
     end
   end
@@ -347,7 +354,11 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   end
 
   defp normalize_issue_id(arguments) when is_map(arguments) do
-    normalize_text_argument(arguments, ["issueId", "issue_id", "id", "identifier", "key", :issue_id, :issueId, :id, :identifier, :key], :missing_issue_id)
+    normalize_text_argument(
+      arguments,
+      ["issueId", "issue_id", "id", "identifier", "key", :issue_id, :issueId, :id, :identifier, :key],
+      :missing_issue_id
+    )
   end
 
   defp normalize_issue_id(_arguments), do: {:error, :invalid_tracker_arguments}
