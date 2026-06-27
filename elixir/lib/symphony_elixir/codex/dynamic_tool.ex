@@ -236,8 +236,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       true ->
         case workspace_change_status(Keyword.get(opts, :workspace)) do
           :changed -> :ok
-          :clean -> {:error, :workspace_diff_required_for_tracker_comment}
-          :unknown -> :ok
+          _ -> {:error, :workspace_diff_required_for_tracker_comment}
         end
     end
   end

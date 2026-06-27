@@ -22,6 +22,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Before any tracker comment/write tool call"
     assert prompt =~ "docs/codex-squad-evidence.md"
     assert prompt =~ "first create a failing/regression test"
+    assert prompt =~ "explicit and verifiable"
     assert prompt =~ "Tracker workpad-only progress is not implementation progress"
     assert prompt =~ "### Runtime Blocker"
   end

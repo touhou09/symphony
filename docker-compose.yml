@@ -14,6 +14,7 @@ services:
       - ./elixir/WORKFLOW.md:/app/elixir/WORKFLOW.md:ro
       - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro
       - ${HOME}/.codex/config.toml:/root/.codex/config.toml:ro
+      - ${SYMPHONY_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
       - symphony-workspaces:/var/lib/symphony/workspaces
       - symphony-logs:/var/log/symphony
     command:

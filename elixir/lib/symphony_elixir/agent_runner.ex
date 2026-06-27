@@ -224,7 +224,7 @@ defmodule SymphonyElixir.AgentRunner do
     Role contract:
     - Before any tracker comment/write tool call, create or update a workspace file so `git status --short` is non-empty. The preferred first edit is `#{@squad_evidence_path}`.
     - `cto`: first create or refresh `#{@squad_evidence_path}` with `## Scope` and `## CTO Plan`; define bounded implementation and validation criteria.
-    - `implementer`: first create a failing/regression test or the smallest code/docs edit, then implement the scoped changes and write `## Implementation` with role/model/result.
+    - `implementer`: first create a failing/regression test or the smallest code/docs edit in the workspace, then implement the scoped changes and write `## Implementation` with role/model/result. The first edit path must be explicit and verifiable in evidence.
     - verifier roles: first append a verification note to `#{@squad_evidence_path}`, inspect the diff and evidence, run targeted validation, then add a `## Verification` checklist row exactly containing the verifier role, configured model, and `PASS` or `FAIL`.
 
     No-diff contract:

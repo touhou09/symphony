@@ -717,6 +717,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp no_diff_token_limit_error(running_entry) when is_map(running_entry) do
     limit = Config.settings!().codex.max_no_diff_tokens
     total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
+    workspace_status = workspace_diff_status(Map.get(running_entry, :workspace_path))
 
     cond do
       not is_integer(limit) or limit <= 0 ->
@@ -725,8 +726,11 @@ defmodule SymphonyElixir.Orchestrator do
       not is_integer(total_tokens) or total_tokens < limit ->
         nil
 
-      workspace_git_status(Map.get(running_entry, :workspace_path)) == :clean ->
+      workspace_status == :clean ->
         "codex exceeded no-diff token limit: #{total_tokens} >= #{limit} and workspace has no git changes"
+
+      workspace_status == :unknown ->
+        "codex exceeded no-diff token limit: #{total_tokens} >= #{limit} and workspace is not available for verified diff checks"
 
       true ->
         nil
@@ -734,6 +738,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp no_diff_token_limit_error(_running_entry), do: nil
+
+  defp workspace_diff_status(path) when is_binary(path) and path != "" do
+    status = workspace_git_status(path)
+    status
+  end
+
+  defp workspace_diff_status(_path), do: :unknown
 
   defp workspace_git_status(path) when is_binary(path) and path != "" do
     case System.cmd("git", ["-C", path, "status", "--porcelain=v1", "--branch"], stderr_to_stdout: true) do

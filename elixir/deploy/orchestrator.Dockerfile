@@ -29,6 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     build-essential \
     ca-certificates \
+    docker-cli \
+    docker-compose \
     git \
     nodejs \
     npm \

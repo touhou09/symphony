@@ -1198,6 +1198,110 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert blocker_body =~ "codex exceeded no-diff token limit"
   end
 
+  test "poll cycle blocks no-diff workers when workspace status is unavailable" do
+    issue_id = "issue-no-diff-unknown"
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_comments, [
+      %{issue_id: issue_id, id: "comment-1", body: "## Codex Workpad\n\n### Notes"}
+    ])
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{
+        id: issue_id,
+        identifier: "MT-NODIFF-UNKNOWN",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-NODIFF-UNKNOWN"
+      }
+    ])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      codex_max_no_diff_tokens: 50
+    )
+
+    workspace_path =
+      Path.join(System.tmp_dir!(), "symphony-no-diff-unknown-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workspace_path)
+    on_exit(fn -> File.rm_rf(workspace_path) end)
+
+    orchestrator_name = Module.concat(__MODULE__, :NoDiffUnknownWorkspaceOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    started_at = DateTime.utc_now()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: "MT-NODIFF-UNKNOWN",
+      issue: %Issue{
+        id: issue_id,
+        identifier: "MT-NODIFF-UNKNOWN",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-NODIFF-UNKNOWN"
+      },
+      worker_host: nil,
+      workspace_path: workspace_path,
+      session_id: "thread-nodiff-unknown",
+      turn_count: 1,
+      last_codex_message: nil,
+      last_codex_timestamp: started_at,
+      last_codex_event: :notification,
+      codex_input_tokens: 40,
+      codex_output_tokens: 20,
+      codex_total_tokens: 60,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, :run_poll_cycle)
+
+    Process.sleep(100)
+    state = :sys.get_state(pid)
+
+    refute Process.alive?(worker_pid)
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+
+    assert %{
+             identifier: "MT-NODIFF-UNKNOWN",
+             workspace_path: ^workspace_path,
+             error: "codex exceeded no-diff token limit: 60 >= 50 and workspace is not available for verified diff checks"
+           } = state.blocked[issue_id]
+
+    assert_receive {:memory_tracker_comments_requested, ^issue_id}
+    assert_receive {:memory_tracker_comment_update, ^issue_id, "comment-1", blocker_body}
+    assert blocker_body =~ "<!-- symphony-runtime-blocker:no-diff-token-limit -->"
+    assert blocker_body =~ "codex exceeded no-diff token limit"
+  end
+
   test "normal completion blocks no-diff workers before continuation retry" do
     issue_id = "issue-no-diff-normal-down"
 

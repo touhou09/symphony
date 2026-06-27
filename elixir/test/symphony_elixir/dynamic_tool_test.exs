@@ -202,6 +202,31 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert_received {:tracker_comment, "SYM-11", "## Codex Workpad\n\n- [x] Evidence file created"}
   end
 
+  test "tracker comment writes remain blocked when workspace status cannot be checked" do
+    workspace = Path.join(System.tmp_dir!(), "dynamic-tool-no-diff-unknown-#{System.unique_integer([:positive, :monotonic])}")
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "tracker_update_comment",
+        %{"issueId" => "SYM-11", "commentId" => "11388", "body" => "## Codex Workpad\n\n- [x] Planned only"},
+        tracker_kind: "jira",
+        workspace: workspace,
+        require_workspace_diff_for_tracker_comments: true,
+        tracker_comment_updater: fn issue_id, comment_id, body ->
+          send(test_pid, {:unexpected_tracker_update, issue_id, comment_id, body})
+          :ok
+        end
+      )
+
+    assert response["success"] == false
+    assert Jason.decode!(response["output"])["error"]["message"] =~ "blocked until the workspace has"
+    refute_received {:unexpected_tracker_update, _, _, _}
+  end
+
   test "unsupported tools return a failure payload with the supported tool list" do
     response = DynamicTool.execute("not_a_real_tool", %{})
 
