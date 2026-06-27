@@ -152,11 +152,83 @@ defmodule Mix.Tasks.Workspace.PublishPr do
   end
 
   defp push_branch!(branch) do
-    run!("git", ["push", "-u", "origin", branch])
+    if github_token_env?() do
+      with_github_askpass(fn askpass_path ->
+        run!("git", ["push", "-u", "origin", branch], env: [{"GIT_ASKPASS", askpass_path}, {"GIT_TERMINAL_PROMPT", "0"}])
+      end)
+    else
+      run!("git", ["push", "-u", "origin", branch])
+    end
+
     Mix.shell().info("Pushed branch #{branch}")
   end
 
+  defp github_token_env? do
+    env_present?("GH_TOKEN") or env_present?("GITHUB_TOKEN")
+  end
+
+  defp env_present?(key) do
+    case System.get_env(key) do
+      value when is_binary(value) -> String.trim(value) != ""
+      _ -> false
+    end
+  end
+
+  defp with_github_askpass(fun) do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-git-askpass-#{System.unique_integer([:positive, :monotonic])}.sh"
+      )
+
+    File.write!(path, github_askpass_script())
+    File.chmod!(path, 0o700)
+
+    try do
+      fun.(path)
+    after
+      File.rm(path)
+    end
+  end
+
+  defp github_askpass_script do
+    """
+    #!/bin/sh
+    case "$1" in
+      *Username*) printf '%s\\n' 'x-access-token' ;;
+      *Password*) printf '%s\\n' "${GH_TOKEN:-$GITHUB_TOKEN}" ;;
+      *) printf '\\n' ;;
+    esac
+    """
+  end
+
   defp open_pull_request_url(repo, branch) do
+    cond do
+      gh_available?() ->
+        open_pull_request_url_with_gh(repo, branch)
+
+      github_token_env?() ->
+        open_pull_request_with_api(repo, branch)
+
+      true ->
+        nil
+    end
+  end
+
+  defp create_pull_request!(repo, base, branch, title, body) do
+    cond do
+      gh_available?() ->
+        create_pull_request_with_gh!(repo, base, branch, title, body)
+
+      github_token_env?() ->
+        create_pull_request_with_api!(repo, base, branch, title, body)
+
+      true ->
+        Mix.raise("GitHub PR creation requires gh or GH_TOKEN/GITHUB_TOKEN")
+    end
+  end
+
+  defp open_pull_request_url_with_gh(repo, branch) do
     case run("gh", [
            "pr",
            "list",
@@ -182,7 +254,7 @@ defmodule Mix.Tasks.Workspace.PublishPr do
     end
   end
 
-  defp create_pull_request!(repo, base, branch, title, body) do
+  defp create_pull_request_with_gh!(repo, base, branch, title, body) do
     output =
       run!("gh", [
         "pr",
@@ -205,18 +277,150 @@ defmodule Mix.Tasks.Workspace.PublishPr do
   end
 
   defp maybe_add_symphony_label(repo, branch) do
-    case open_pull_request_url(repo, branch) do
-      nil ->
-        :ok
+    if gh_available?() do
+      case open_pull_request_url_with_gh(repo, branch) do
+        nil ->
+          :ok
 
-      url ->
-        run("gh", ["pr", "edit", url, "--repo", repo, "--add-label", "symphony"])
-        :ok
+        url ->
+          run("gh", ["pr", "edit", url, "--repo", repo, "--add-label", "symphony"])
+          :ok
+      end
+    else
+      :ok
     end
   end
 
-  defp run!(command, args) do
-    case run(command, args) do
+  defp open_pull_request_with_api(repo, branch) do
+    token = github_token!()
+    {owner, _name} = github_repo_parts!(repo)
+
+    case github_api_request(:get, repo, "/pulls",
+           token: token,
+           params: [state: "open", head: "#{owner}:#{branch}"]
+         ) do
+      {:ok, pulls} when is_list(pulls) ->
+        pulls
+        |> List.first()
+        |> case do
+          %{"html_url" => url} when is_binary(url) -> url
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp create_pull_request_with_api!(repo, base, branch, title, body) do
+    token = github_token!()
+    {owner, _name} = github_repo_parts!(repo)
+
+    payload = %{
+      title: title,
+      body: body,
+      base: base,
+      head: "#{owner}:#{branch}"
+    }
+
+    case github_api_request(:post, repo, "/pulls", token: token, json: payload) do
+      {:ok, %{"html_url" => url, "number" => number}} ->
+        Mix.shell().info("Created PR for #{branch}: #{url}")
+        add_symphony_label_with_api(repo, number, token)
+
+      {:ok, %{"html_url" => url}} ->
+        Mix.shell().info("Created PR for #{branch}: #{url}")
+
+      {:error, reason} ->
+        Mix.raise("GitHub PR creation failed: #{reason}")
+    end
+  end
+
+  defp add_symphony_label_with_api(repo, number, token) when is_integer(number) do
+    github_api_request(:post, repo, "/issues/#{number}/labels",
+      token: token,
+      json: %{labels: ["symphony"]}
+    )
+
+    :ok
+  end
+
+  defp add_symphony_label_with_api(_repo, _number, _token), do: :ok
+
+  defp github_api_request(method, repo, path, opts) do
+    {owner, name} = github_repo_parts!(repo)
+    base_url = System.get_env("SYMPHONY_GITHUB_API_URL") || "https://api.github.com"
+    url = "#{String.trim_trailing(base_url, "/")}/repos/#{owner}/#{name}#{path}"
+    token = Keyword.fetch!(opts, :token)
+
+    req_opts =
+      [
+        method: method,
+        url: url,
+        headers: [
+          {"accept", "application/vnd.github+json"},
+          {"authorization", "Bearer #{token}"},
+          {"user-agent", "symphony"},
+          {"x-github-api-version", "2022-11-28"}
+        ],
+        params: Keyword.get(opts, :params, [])
+      ]
+      |> maybe_put_json(opts)
+
+    case Req.request(req_opts) do
+      {:ok, %{status: status, body: body}} when status in 200..299 ->
+        {:ok, body}
+
+      {:ok, %{status: status, body: body}} ->
+        {:error, "HTTP #{status} #{github_error_message(body)}"}
+
+      {:error, reason} ->
+        {:error, Exception.message(reason)}
+    end
+  end
+
+  defp maybe_put_json(req_opts, opts) do
+    case Keyword.fetch(opts, :json) do
+      {:ok, json} -> Keyword.put(req_opts, :json, json)
+      :error -> req_opts
+    end
+  end
+
+  defp github_error_message(%{"message" => message}) when is_binary(message), do: message
+  defp github_error_message(body) when is_binary(body), do: body
+  defp github_error_message(body), do: inspect(body)
+
+  defp github_repo_parts!(repo) do
+    case String.split(repo, "/", parts: 2) do
+      [owner, name] when owner != "" and name != "" -> {owner, name}
+      _ -> Mix.raise("Invalid GitHub repo #{inspect(repo)}")
+    end
+  end
+
+  defp github_token! do
+    github_token() || Mix.raise("GH_TOKEN/GITHUB_TOKEN is required for GitHub API publishing")
+  end
+
+  defp github_token do
+    ["GH_TOKEN", "GITHUB_TOKEN"]
+    |> Enum.find_value(fn key ->
+      case System.get_env(key) do
+        value when is_binary(value) ->
+          value = String.trim(value)
+          if value == "", do: nil, else: value
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp gh_available? do
+    not is_nil(System.find_executable("gh"))
+  end
+
+  defp run!(command, args, opts \\ []) do
+    case run(command, args, opts) do
       {:ok, output} ->
         output
 
@@ -225,13 +429,13 @@ defmodule Mix.Tasks.Workspace.PublishPr do
     end
   end
 
-  defp run(command, args) do
+  defp run(command, args, opts \\ []) do
     case System.find_executable(command) do
       nil ->
         {:error, {127, "#{command} not found"}}
 
       path ->
-        case System.cmd(path, args, stderr_to_stdout: true) do
+        case System.cmd(path, args, Keyword.merge([stderr_to_stdout: true], opts)) do
           {output, 0} -> {:ok, output}
           {output, status} -> {:error, {status, output}}
         end
