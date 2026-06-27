@@ -1,5 +1,6 @@
 services:
   orchestrator:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: elixir/deploy/orchestrator.Dockerfile

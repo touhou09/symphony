@@ -50,10 +50,18 @@ ticket:
   require_validation_checkboxes: true
 hooks:
   after_create: |
-    git clone --depth 1 "${SYMPHONY_SOURCE_REPO:-https://github.com/openai/symphony}" .
+    repo="${SYMPHONY_SOURCE_REPO:-https://github.com/openai/symphony}"
+    branch="${SYMPHONY_SOURCE_BRANCH:-}"
+    if [ -n "$branch" ]; then
+      git clone --depth 1 --branch "$branch" "$repo" .
+    else
+      git clone --depth 1 "$repo" .
+    fi
     if command -v mise >/dev/null 2>&1; then
       cd elixir && mise trust && mise exec -- mix deps.get
     fi
+  after_complete: |
+    cd elixir && mise exec -- mix workspace.publish_pr --repo "${SYMPHONY_PR_REPO:-touhou09/symphony}" --base "${SYMPHONY_PR_BASE:-feat/jira-tracker-adapter}"
   before_remove: |
     cd elixir && mise exec -- mix workspace.before_remove
 agent:
@@ -265,6 +273,7 @@ Use this only when completion is blocked by missing required tools or missing au
 7.  Before every `git push` attempt, run the required validation for your scope and confirm it passes; if it fails, address issues and rerun until green, then commit and push changes.
 8.  Attach PR URL to the issue (prefer attachment; use the workpad comment only if attachment is unavailable).
     - Ensure the GitHub PR has label `symphony` (add it if missing).
+    - A completed ticket must leave behind a pushed branch and an open PR before it leaves active execution. If the agent cannot create the PR directly, it must leave the branch pushed so the `after_complete` hook can create or discover the PR.
 9.  Merge latest `origin/main` into branch, resolve conflicts, and rerun checks.
 10. Update the workpad comment with final checklist status and validation notes.
     - Mark completed plan/acceptance/validation checklist items as checked.

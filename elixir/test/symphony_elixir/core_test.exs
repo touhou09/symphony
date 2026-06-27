@@ -182,10 +182,12 @@ defmodule SymphonyElixir.CoreTest do
     assert is_map(hooks)
 
     assert Map.get(hooks, "after_create") =~
-             "git clone --depth 1 \"${SYMPHONY_SOURCE_REPO:-https://github.com/openai/symphony}\" ."
+             "git clone --depth 1 --branch \"$branch\" \"$repo\" ."
 
     assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
     assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
+    assert Map.get(hooks, "after_complete") =~ "mix workspace.publish_pr"
+    assert Map.get(hooks, "after_complete") =~ "SYMPHONY_PR_REPO"
     assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
 
     agent = Map.get(config, "agent", %{})
@@ -402,12 +404,14 @@ defmodule SymphonyElixir.CoreTest do
     issue_id = "issue-2"
     issue_identifier = "MT-556"
     workspace = Path.join(test_root, issue_identifier)
+    hook_output = Path.join(test_root, "terminal-after-complete.txt")
 
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: test_root,
         tracker_active_states: ["Todo", "In Progress", "In Review"],
-        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"]
+        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
+        hook_after_complete: "printf '%s' terminal-after-complete > #{hook_output}"
       )
 
       File.mkdir_p!(test_root)
@@ -427,6 +431,7 @@ defmodule SymphonyElixir.CoreTest do
             ref: nil,
             identifier: issue_identifier,
             issue: %Issue{id: issue_id, state: "In Progress", identifier: issue_identifier},
+            workspace_path: workspace,
             started_at: DateTime.utc_now()
           }
         },
@@ -449,6 +454,107 @@ defmodule SymphonyElixir.CoreTest do
       refute Map.has_key?(updated_state.running, issue_id)
       refute MapSet.member?(updated_state.claimed, issue_id)
       refute Process.alive?(agent_pid)
+      assert File.read!(hook_output) == "terminal-after-complete"
+      refute File.exists?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "non-active retry completion runs after_complete hook before releasing claim" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-after-complete-hook-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-after-complete"
+    issue_identifier = "MT-845"
+    workspace = Path.join(test_root, issue_identifier)
+    hook_output = Path.join(test_root, "after-complete.txt")
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        tracker_active_states: ["Todo", "In Progress"],
+        tracker_terminal_states: ["Closed", "Done"],
+        hook_after_complete: "printf '%s' after-complete > #{hook_output}"
+      )
+
+      File.mkdir_p!(workspace)
+
+      state = %Orchestrator.State{
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: issue_identifier,
+        state: "Human Review",
+        title: "Ready for review",
+        description: "Completed",
+        labels: []
+      }
+
+      updated_state =
+        Orchestrator.handle_retry_issue_lookup_for_test(issue, state, issue_id, 1, %{
+          workspace_path: workspace
+        })
+
+      refute MapSet.member?(updated_state.claimed, issue_id)
+      assert File.read!(hook_output) == "after-complete"
+      assert File.exists?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "terminal retry completion runs after_complete hook before cleaning workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-terminal-after-complete-hook-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-terminal-after-complete"
+    issue_identifier = "MT-846"
+    workspace = Path.join(test_root, issue_identifier)
+    hook_output = Path.join(test_root, "terminal-after-complete.txt")
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        tracker_active_states: ["Todo", "In Progress"],
+        tracker_terminal_states: ["Closed", "Done"],
+        hook_after_complete: "test -d . && printf '%s' terminal-after-complete > #{hook_output}"
+      )
+
+      File.mkdir_p!(workspace)
+
+      state = %Orchestrator.State{
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: issue_identifier,
+        state: "Closed",
+        title: "Ready for cleanup",
+        description: "Completed",
+        labels: []
+      }
+
+      updated_state =
+        Orchestrator.handle_retry_issue_lookup_for_test(issue, state, issue_id, 1, %{
+          workspace_path: workspace
+        })
+
+      refute MapSet.member?(updated_state.claimed, issue_id)
+      assert File.read!(hook_output) == "terminal-after-complete"
       refute File.exists?(workspace)
     after
       File.rm_rf(test_root)

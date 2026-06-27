@@ -104,3 +104,31 @@
 - **Test**: `mix format --check-formatted`, targeted ExUnit 24/24, `mix ticket.check` OK, `mix squad.check` OK, Docker Compose rebuild OK, and SYM-11 one-ticket smoke produced persistent `docs/codex-squad-evidence.md` diff before the temp stack was stopped.
 - **Trap**: A prior smoke with old guard exited clean with no persistent diff; the fix added the normal `:DOWN` guard and regression test for that exact path.
 ---
+
+## 2026-06-27: Local autostart recovery [done]
+- **What**: Added login-time recovery so Colima starts first and the headless Symphony orchestrator is reconciled into a running Compose service.
+- **Why**: The Mac should recover Tailscale and Symphony after power or login cycles without manually replaying the setup commands.
+- **Impact**: Local SYM orchestration resumes on this Mac after login, with Docker keeping the orchestrator alive unless it is explicitly stopped.
+- **Test**: LaunchAgent enabled and run exit code 0, Colima running, `docker compose ps` showed `symphony-orchestrator-1` Up, and Tailscale status returned `100.66.205.12`.
+---
+
+## 2026-06-27: Fork source deployment wiring [done]
+- **What**: Pointed the local Compose deployment at the `touhou09/symphony` fork and made workspace bootstrap honor an explicit source branch.
+- **Why**: Using only the fork URL would still clone the default branch, so Jira workspaces needed branch-aware cloning to run the active adapter branch.
+- **Impact**: New workspaces after the next orchestrator recreate clone `feat/jira-tracker-adapter` from the fork instead of upstream `openai/symphony`.
+- **Test**: Compose config resolved `SYMPHONY_SOURCE_REPO=https://github.com/touhou09/symphony` and `SYMPHONY_SOURCE_BRANCH=feat/jira-tracker-adapter`; running container was intentionally left untouched while active agents continue.
+---
+
+## 2026-06-27: Fork image redeploy [done]
+- **What**: Captured active SYM-6/SYM-11 workspace diffs, rebuilt the orchestrator image from the local fork checkout, force-recreated the Compose service, and retargeted existing workspaces to the fork remote.
+- **Why**: Env-only recreate made future clones fork-aware, but a real fork deployment also needed the container image rebuilt and existing active workspaces moved off the upstream remote.
+- **Impact**: The running orchestrator now uses the fork repo/branch settings while interrupted active Jira work was restarted against preserved workspaces.
+- **Test**: `docker compose build orchestrator` succeeded, `docker compose up -d --force-recreate orchestrator` started, container env reports `touhou09/symphony` and `feat/jira-tracker-adapter`, restart policy is `unless-stopped`, and SYM-6/SYM-11 diffs remained present.
+---
+
+## 2026-06-27: Completion PR publish hook [done]
+- **What**: Added a workspace completion hook that commits, pushes, and opens or discovers a GitHub PR after Symphony work leaves active execution.
+- **Why**: Finished Jira work must leave a reviewable branch/PR even when the unattended agent exits before manually attaching one.
+- **Impact**: Completed fork workspaces now publish against `touhou09/symphony` with base `feat/jira-tracker-adapter`; SYM-6 and SYM-11 were published as PR #1 and #2.
+- **Test**: `mix format`, targeted ExUnit 65/65, `git push` for both workspace branches, and GitHub PR lookup confirmed both PRs open.
+---
