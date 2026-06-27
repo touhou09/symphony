@@ -169,7 +169,13 @@ the host config wholesale:
     `contains_shell_environment_policy=true`, `codex_status=0`,
     `contains_hooks_parse_error=no`
   - `cd elixir && mix squad.check --file ../docs/codex-squad-evidence.md --workflow WORKFLOW.md`
-    -> pending rerun after this evidence update.
+    -> `squad.check: evidence contract OK`
+  - `MIX_ENV=dev make -C elixir all` was attempted for the push-skill gate.
+    It passed setup, build, format, lint, and example squad-check after the
+    final lint cleanup, then failed in the broader existing coverage suite with
+    `OrchestratorStatusTest` setup failures because `SymphonyElixir.Supervisor`
+    was not running, plus coverage below the repository threshold. This is
+    outside the SYM-16 config-filter path; targeted ticket validation passed.
 
 ## Verifier Findings
 

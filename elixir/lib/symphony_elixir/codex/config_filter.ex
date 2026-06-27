@@ -64,16 +64,14 @@ defmodule SymphonyElixir.Codex.ConfigFilter do
   end
 
   defp maybe_next_state(line, true, lines) do
-    cond do
-      section_header?(line) ->
-        if denied_section?(line) do
-          {true, lines}
-        else
-          {false, [line | lines]}
-        end
-
-      true ->
+    if section_header?(line) do
+      if denied_section?(line) do
         {true, lines}
+      else
+        {false, [line | lines]}
+      end
+    else
+      {true, lines}
     end
   end
 
