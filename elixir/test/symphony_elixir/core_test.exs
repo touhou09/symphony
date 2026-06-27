@@ -26,6 +26,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Tracker workpad-only progress is not implementation progress"
     assert prompt =~ "### Runtime Blocker"
     assert prompt =~ "excluding `docs/codex-squad-evidence.md`"
+    assert prompt =~ "cd elixir && mix squad.check --file ../docs/codex-squad-evidence.md --workflow WORKFLOW.md"
   end
 
   test "implementer workspace progress requires non-evidence file edits" do

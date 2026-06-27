@@ -11,6 +11,7 @@ defmodule SymphonyElixir.AgentRunner do
   @type worker_host :: String.t() | nil
 
   @squad_evidence_path "docs/codex-squad-evidence.md"
+  @squad_evidence_check_command "cd elixir && mix squad.check --file ../docs/codex-squad-evidence.md --workflow WORKFLOW.md"
 
   @doc false
   @spec squad_codex_command_for_test(String.t(), String.t()) :: String.t()
@@ -251,7 +252,7 @@ defmodule SymphonyElixir.AgentRunner do
     - Run `git status --short` before tracker workpad updates. A normal workpad update is allowed only after the workspace has a code, test, docs, or evidence diff.
 
     Completion contract:
-    - Do not mark the issue successful unless `mix squad.check --file #{@squad_evidence_path} --workflow WORKFLOW.md` passes.
+    - Do not mark the issue successful unless `#{@squad_evidence_check_command}` passes.
     - If this role cannot complete, update the tracker workpad with the concrete blocker and stop instead of guessing.
     """
   end
