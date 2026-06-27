@@ -508,6 +508,206 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Enum.map(sorted, & &1.identifier) == ["MT-200", "MT-201", "MT-199"]
   end
 
+  test "dispatch plan caps active candidates and keeps deterministic ordering with a seven-candidate queue" do
+    state =
+      orchestrator_state_for_test(
+        max_active_issues: 3,
+        max_concurrent_agents: 10
+      )
+
+    issues =
+      [
+        {"MT-300", 1, ~U[2026-01-01 00:00:00Z]},
+        {"MT-301", 1, ~U[2026-01-02 00:00:00Z]},
+        {"MT-302", 2, ~U[2026-01-03 00:00:00Z]},
+        {"MT-303", 1, ~U[2026-01-01 12:00:00Z]},
+        {"MT-304", 2, ~U[2026-01-01 06:00:00Z]},
+        {"MT-305", 1, ~U[2025-12-31 23:59:59Z]},
+        {"MT-306", 3, ~U[2026-01-04 00:00:00Z]}
+      ]
+      |> Enum.map(fn {identifier, priority, created_at} ->
+        %Issue{
+          id: identifier,
+          identifier: identifier,
+          title: "#{identifier} in queue",
+          state: "Todo",
+          priority: priority,
+          created_at: created_at,
+          labels: ["symphony"]
+        }
+      end)
+
+    %{dispatch: dispatch_ids, queued: queued_ids} =
+      Orchestrator.dispatch_plan_for_test(issues, state)
+
+    assert dispatch_ids == ["MT-305", "MT-300", "MT-303"]
+    assert queued_ids == ["MT-301", "MT-304", "MT-302", "MT-306"]
+  end
+
+  test "dispatch plan skips already claimed candidates and releases waiting capacity for others" do
+    state =
+      orchestrator_state_for_test(
+        max_active_issues: 2,
+        running_claims: %{"MT-303" => System.system_time(:millisecond) + 60_000},
+        max_concurrent_agents: 10
+      )
+
+    issues =
+      [
+        {"MT-301", 1, ~U[2026-01-02 00:00:00Z]},
+        {"MT-302", 1, ~U[2026-01-03 00:00:00Z]},
+        {"MT-303", 1, ~U[2026-01-01 00:00:00Z]}
+      ]
+      |> Enum.map(fn {identifier, priority, created_at} ->
+        %Issue{
+          id: identifier,
+          identifier: identifier,
+          title: "#{identifier} claimed queue test",
+          state: "Todo",
+          priority: priority,
+          created_at: created_at,
+          labels: ["symphony"]
+        }
+      end)
+
+    %{dispatch: dispatch_ids, queued: queued_ids} =
+      Orchestrator.dispatch_plan_for_test(issues, state)
+
+    assert dispatch_ids == ["MT-301"]
+    assert queued_ids == ["MT-302"]
+  end
+
+  test "dispatch plan refills queued candidates after an active slot is released" do
+    state =
+      orchestrator_state_for_test(
+        max_active_issues: 1,
+        running_claims: %{"MT-303" => System.system_time(:millisecond) + 60_000},
+        max_concurrent_agents: 10
+      )
+
+    issues =
+      [
+        {"MT-303", 1, ~U[2026-01-01 00:00:00Z]},
+        {"MT-301", 1, ~U[2026-01-02 00:00:00Z]}
+      ]
+      |> Enum.map(fn {identifier, priority, created_at} ->
+        %Issue{
+          id: identifier,
+          identifier: identifier,
+          title: "#{identifier} in queue refill test",
+          state: "Todo",
+          priority: priority,
+          created_at: created_at,
+          labels: ["symphony"]
+        }
+      end)
+
+    %{dispatch: dispatch_ids, queued: queued_ids} =
+      Orchestrator.dispatch_plan_for_test(issues, state)
+
+    assert dispatch_ids == []
+    assert queued_ids == ["MT-301"]
+
+    released_state =
+      state
+      |> Map.put(:running_claims, %{})
+      |> Map.put(:claimed, MapSet.new())
+      |> Map.put(:blocked, %{"MT-303" => %{issue: Enum.at(issues, 0), blocked_at: DateTime.utc_now()}})
+      |> Map.put(:queued, ["MT-301"])
+
+    %{dispatch: dispatch_ids_after_release, queued: queued_ids_after_release} =
+      Orchestrator.dispatch_plan_for_test(issues, released_state)
+
+    assert dispatch_ids_after_release == ["MT-301"]
+    assert queued_ids_after_release == []
+  end
+
+  test "persisted restart claims are renewed and keep their active slot" do
+    File.mkdir_p!(".symphony")
+    claims_path = Path.join([".symphony", "orchestrator-running-claims.json"])
+    File.write!(claims_path, Jason.encode!(%{"MT-303" => System.system_time(:millisecond) - 60_000}))
+
+    state =
+      orchestrator_state_for_test(
+        max_active_issues: 1,
+        max_concurrent_agents: 10
+      )
+      |> Orchestrator.load_running_claims_for_test()
+
+    on_exit(fn -> File.rm(claims_path) end)
+
+    assert state.running_claims["MT-303"] > System.system_time(:millisecond)
+
+    issues =
+      [
+        {"MT-303", 1, ~U[2026-01-01 00:00:00Z]},
+        {"MT-301", 1, ~U[2026-01-02 00:00:00Z]}
+      ]
+      |> Enum.map(fn {identifier, priority, created_at} ->
+        %Issue{
+          id: identifier,
+          identifier: identifier,
+          title: "#{identifier} restart claim test",
+          state: "Todo",
+          priority: priority,
+          created_at: created_at,
+          labels: ["symphony"]
+        }
+      end)
+
+    %{dispatch: dispatch_ids, queued: queued_ids} =
+      Orchestrator.dispatch_plan_for_test(issues, state)
+
+    assert dispatch_ids == []
+    assert queued_ids == ["MT-301"]
+  end
+
+  test "dispatch plan excludes terminal/cancelled/stale issues from both dispatch and queue" do
+    state =
+      orchestrator_state_for_test(
+        max_active_issues: 2,
+        max_concurrent_agents: 10
+      )
+
+    issues = [
+      %Issue{
+        id: "terminal-1",
+        identifier: "MT-401",
+        title: "Terminal should remain out",
+        state: "Closed",
+        labels: ["symphony"]
+      },
+      %Issue{
+        id: "stale-blocked",
+        identifier: "MT-402",
+        title: "Stale blocker should stay out",
+        state: "Todo",
+        labels: ["symphony"],
+        blocked_by: [%{id: "blocker-1", identifier: "MT-450", state: "In Progress"}]
+      },
+      %Issue{
+        id: "cancelled-1",
+        identifier: "MT-403",
+        title: "Canceled should remain out",
+        state: "Cancelled",
+        labels: ["symphony"]
+      },
+      %Issue{
+        id: "ready-1",
+        identifier: "MT-404",
+        title: "Ready candidate",
+        state: "Todo",
+        labels: ["symphony"]
+      }
+    ]
+
+    %{dispatch: dispatch_ids, queued: queued_ids} =
+      Orchestrator.dispatch_plan_for_test(issues, state)
+
+    assert dispatch_ids == ["ready-1"]
+    assert queued_ids == []
+  end
+
   test "todo issue with non-terminal blocker is not dispatch-eligible" do
     state = %Orchestrator.State{
       max_concurrent_agents: 3,
@@ -801,6 +1001,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
     assert config.worker.max_concurrent_agents_per_host == nil
     assert config.agent.max_concurrent_agents == 10
+    assert config.agent.max_active_issues == 3
 
     assert config.agent.model_roles == %{
              "cto" => "gpt-5.5",
@@ -893,6 +1094,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_agents: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "agent.max_concurrent_agents"
+
+    write_workflow_file!(Workflow.workflow_file_path(), max_active_issues: "bad")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "agent.max_active_issues"
 
     write_workflow_file!(Workflow.workflow_file_path(), agent_model_roles: %{cto: ""})
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -1423,5 +1628,20 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp orchestrator_state_for_test(opts \\ []) do
+    max_active_issues = Keyword.get(opts, :max_active_issues, 1)
+    running_claims = Keyword.get(opts, :running_claims, %{})
+
+    %Orchestrator.State{
+      max_active_issues: max_active_issues,
+      max_concurrent_agents: Keyword.get(opts, :max_concurrent_agents, 10),
+      running_claims: running_claims,
+      running: %{},
+      claimed: MapSet.new(),
+      retry_attempts: %{},
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
   end
 end
