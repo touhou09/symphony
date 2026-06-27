@@ -138,6 +138,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
       field(:max_concurrent_agents_by_state, :map, default: %{})
+      field(:model_roles, :map, default: %{})
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -145,13 +146,21 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [
+          :max_concurrent_agents,
+          :max_turns,
+          :max_retry_backoff_ms,
+          :max_concurrent_agents_by_state,
+          :model_roles
+        ],
         empty_values: []
       )
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
+      |> update_change(:model_roles, &Schema.normalize_map_keys/1)
+      |> Schema.validate_model_roles()
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
     end
   end
@@ -356,6 +365,56 @@ defmodule SymphonyElixir.Config.Schema do
       end)
     end)
   end
+
+  def validate_model_roles(changeset) do
+    validate_change(changeset, :model_roles, fn :model_roles, roles ->
+      cond do
+        not is_map(roles) ->
+          [{:model_roles, "model_roles must be a map"}]
+
+        true ->
+          Enum.flat_map(roles, &validate_model_role/1)
+      end
+    end)
+  end
+
+  def validate_model_role({role, model}) do
+    role_name = normalize_role_name(role)
+
+    cond do
+      not role_supported?(role_name) ->
+        [{:model_roles, "unsupported role #{inspect(role)}; expected one of cto, implementer, verifier, final_verifier"}]
+
+      not is_binary(model) ->
+        [{:model_roles, "role model for #{inspect(role)} must be a string"}]
+
+      String.trim(model) == "" ->
+        [{:model_roles, "role model for #{inspect(role)} must not be blank"}]
+
+      true ->
+        []
+    end
+  end
+
+  def validate_model_role(_invalid_entry), do: []
+
+  def role_supported?("cto"), do: true
+  def role_supported?("implementer"), do: true
+  def role_supported?("verifier"), do: true
+  def role_supported?("final_verifier"), do: true
+  def role_supported?(_), do: false
+
+  def normalize_role_name(role), do: role |> to_string() |> String.trim() |> String.downcase()
+
+  def normalize_map_keys(nil), do: %{}
+
+  def normalize_map_keys(values) when is_map(values) do
+    Enum.reduce(values, %{}, fn {key, value}, acc ->
+      Map.put(acc, normalize_role_name(key), value)
+    end)
+  end
+
+  def normalize_map_keys(values), do: values
 
   defp changeset(attrs) do
     %__MODULE__{}

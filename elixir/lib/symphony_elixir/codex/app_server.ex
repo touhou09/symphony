@@ -88,7 +88,9 @@ defmodule SymphonyElixir.Codex.AppServer do
         DynamicTool.execute(tool, arguments)
       end)
 
-    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+    model = Keyword.get(opts, :model)
+
+    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy, model) do
       {:ok, turn_id} ->
         session_id = "#{thread_id}-#{turn_id}"
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
@@ -111,6 +113,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             {:ok,
              %{
                result: result,
+               completion: result,
                session_id: session_id,
                thread_id: thread_id,
                turn_id: turn_id
@@ -301,11 +304,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
-    send_message(port, %{
-      "method" => "turn/start",
-      "id" => @turn_start_id,
-      "params" => %{
+  defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy, model) do
+    params =
+      %{
         "threadId" => thread_id,
         "input" => [
           %{
@@ -318,13 +319,27 @@ defmodule SymphonyElixir.Codex.AppServer do
         "approvalPolicy" => approval_policy,
         "sandboxPolicy" => turn_sandbox_policy
       }
-    })
+      |> maybe_put_turn_model(model)
+
+    send_message(port, %{"method" => "turn/start", "id" => @turn_start_id, "params" => params})
 
     case await_response(port, @turn_start_id) do
       {:ok, %{"turn" => %{"id" => turn_id}}} -> {:ok, turn_id}
       other -> other
     end
   end
+
+  defp maybe_put_turn_model(params, model) when is_binary(model) do
+    normalized_model = String.trim(model)
+
+    if normalized_model == "" do
+      params
+    else
+      Map.put(params, "model", normalized_model)
+    end
+  end
+
+  defp maybe_put_turn_model(params, _model), do: params
 
   defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
     receive_loop(
@@ -367,7 +382,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     case Jason.decode(payload_string) do
       {:ok, %{"method" => "turn/completed"} = payload} ->
         emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
-        {:ok, :turn_completed}
+        {:ok, payload}
 
       {:ok, %{"method" => "turn/failed", "params" => _} = payload} ->
         emit_turn_event(

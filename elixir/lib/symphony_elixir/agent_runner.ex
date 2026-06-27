@@ -4,6 +4,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
+  alias SymphonyElixir.SquadRun
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
@@ -87,10 +88,15 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+    model_roles = Config.settings!().agent.model_roles || %{}
 
     with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
       try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        if squad_roles_configured?(model_roles) do
+          run_squad_codex_turns(session, issue, codex_update_recipient, model_roles)
+        else
+          do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        end
       after
         AppServer.stop_session(session)
       end
@@ -136,6 +142,122 @@ defmodule SymphonyElixir.AgentRunner do
           {:error, reason}
       end
     end
+  end
+
+  defp squad_roles_configured?(model_roles) when is_map(model_roles) do
+    Enum.all?(SquadRun.roles(), fn role ->
+      Map.has_key?(model_roles, to_string(role))
+    end)
+  end
+
+  defp squad_roles_configured?(_model_roles), do: false
+
+  defp run_squad_codex_turns(app_session, issue, codex_update_recipient, model_roles) do
+    run = SquadRun.new(issue)
+    evidence_path = Path.expand("docs/codex-squad-evidence.md")
+
+    with {:ok, run} <- run_squad_role(:cto, app_session, issue, codex_update_recipient, run, model_roles),
+         {:ok, run} <- run_squad_role(:implementer, app_session, issue, codex_update_recipient, run, model_roles),
+         {:ok, run} <- run_squad_role(:verifier, app_session, issue, codex_update_recipient, run, model_roles),
+         {:ok, run} <- run_squad_role(:final_verifier, app_session, issue, codex_update_recipient, run, model_roles) do
+      SquadRun.write_markdown(run, evidence_path)
+
+      if SquadRun.handoff_allowed?(run) do
+        Logger.info("Squad handoff gate passed for #{issue_context(issue)}")
+        :ok
+      else
+        Logger.warning("Squad handoff gate failed for #{issue_context(issue)}: verifier or final_verifier did not PASS")
+        {:error, :squad_handoff_blocked}
+      end
+    else
+      {:error, reason, run} ->
+        _ = SquadRun.write_markdown(run, evidence_path)
+        {:error, reason}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp run_squad_role(
+         role,
+         app_session,
+         issue,
+         codex_update_recipient,
+         %SquadRun{} = run,
+         model_roles
+       ) do
+    role_model = Map.get(model_roles, to_string(role))
+    prompt = build_squad_prompt(role, issue, run)
+
+    case AppServer.run_turn(
+           app_session,
+           prompt,
+           issue,
+           on_message: codex_message_handler(codex_update_recipient, issue),
+           model: role_model
+         ) do
+      {:ok, completion} ->
+        {:ok, SquadRun.put_completion(run, role, role_model, raw_turn_completion(completion))}
+
+      {:error, reason} ->
+        {:error, {:squad_turn_error, role, reason}, run |> SquadRun.put_limitation("#{role} turn failed: #{inspect(reason)}")}
+    end
+  end
+
+  defp raw_turn_completion(%{completion: completion}) when is_map(completion), do: completion
+  defp raw_turn_completion(%{result: completion}) when is_map(completion), do: completion
+  defp raw_turn_completion(completion), do: completion
+
+  defp build_squad_prompt(:cto, issue, _run) do
+    [
+      "You are the CTO role for this ticket.",
+      "Produce a concise execution plan and decomposition.",
+      "",
+      PromptBuilder.build_prompt(issue)
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp build_squad_prompt(:implementer, issue, run) do
+    cto_summary = run.role_artifacts[:cto].payload_summary || "pending"
+
+    [
+      "You are the implementer role.",
+      "Use the CTO plan to implement the ticket safely.",
+      "CTO summary: #{cto_summary}",
+      "",
+      PromptBuilder.build_prompt(issue)
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp build_squad_prompt(:verifier, issue, run) do
+    impl_summary = run.role_artifacts[:implementer].payload_summary || "pending"
+
+    [
+      "You are the verifier role.",
+      "Verify implementation against the ticket and prior context.",
+      "Implementer summary: #{impl_summary}",
+      "Respond with a strict PASS or FAIL verdict.",
+      "",
+      PromptBuilder.build_prompt(issue)
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp build_squad_prompt(:final_verifier, issue, run) do
+    verifier_summary = run.role_artifacts[:verifier].payload_summary || "pending"
+
+    [
+      "You are the final_verifier role.",
+      "Review verifier output and final implementation status.",
+      "Verifier summary: #{verifier_summary}",
+      "Respond with PASS or FAIL.",
+      "",
+      PromptBuilder.build_prompt(issue)
+    ]
+    |> Enum.join("\n")
   end
 
   defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
