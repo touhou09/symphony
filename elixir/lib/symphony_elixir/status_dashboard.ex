@@ -317,7 +317,8 @@ defmodule SymphonyElixir.StatusDashboard do
              retrying: retrying,
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
-             polling: Map.get(snapshot, :polling)
+             polling: Map.get(snapshot, :polling),
+             dispatch: Map.get(snapshot, :dispatch)
            }},
           update_token_samples(token_samples, now_ms, total_tokens)
         }
@@ -444,6 +445,7 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_dispatch_line(%{} = dispatch) do
     active_issue_slots = Map.get(dispatch, :active_issue_slots, "n/a")
+    blocked_count = Map.get(dispatch, :blocked_count, 0)
     queued_count = Map.get(dispatch, :queued_count, 0)
     max_active_issues = Map.get(dispatch, :max_active_issues, "?")
 
@@ -451,6 +453,8 @@ defmodule SymphonyElixir.StatusDashboard do
       colorize("limit #{max_active_issues}", @ansi_gray) <>
       colorize(" active ", @ansi_green) <>
       colorize("#{active_issue_slots}", @ansi_orange) <>
+      colorize("/", @ansi_gray) <>
+      colorize("blocked #{blocked_count}", @ansi_gray) <>
       colorize("/", @ansi_gray) <>
       colorize("queued #{queued_count}", @ansi_gray)
   end
@@ -611,7 +615,8 @@ defmodule SymphonyElixir.StatusDashboard do
              retrying: retrying,
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
-             polling: Map.get(snapshot, :polling)
+             polling: Map.get(snapshot, :polling),
+             dispatch: Map.get(snapshot, :dispatch)
            }}
 
         _ ->

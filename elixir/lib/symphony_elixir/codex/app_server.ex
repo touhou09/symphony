@@ -522,28 +522,30 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:approval_required, payload}}
 
       :unhandled ->
-        if needs_input?(method, payload) do
-          emit_message(
-            on_message,
-            :turn_input_required,
-            %{payload: payload, raw: payload_string},
-            metadata
-          )
+        cond do
+          needs_input?(method, payload) ->
+            emit_message(
+              on_message,
+              :turn_input_required,
+              %{payload: payload, raw: payload_string},
+              metadata
+            )
 
-          {:error, {:turn_input_required, payload}}
-        else
-          emit_message(
-            on_message,
-            :notification,
-            %{
-              payload: payload,
-              raw: payload_string
-            },
-            metadata
-          )
+            {:error, {:turn_input_required, payload}}
 
-          Logger.debug("Codex notification: #{inspect(method)}")
-          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+          true ->
+            emit_message(
+              on_message,
+              :notification,
+              %{
+                payload: payload,
+                raw: payload_string
+              },
+              metadata
+            )
+
+            Logger.debug("Codex notification: #{inspect(method)}")
+            receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
         end
     end
   end
@@ -1025,8 +1027,12 @@ defmodule SymphonyElixir.Codex.AppServer do
       |> to_string()
       |> String.downcase()
 
-    if String.contains?(normalized, "401 unauthorized") and String.contains?(normalized, "responses") do
-      "codex authentication failed: HTTP 401 Unauthorized from Responses API"
+    cond do
+      String.contains?(normalized, "401 unauthorized") and String.contains?(normalized, "responses") ->
+        "codex authentication failed: HTTP 401 Unauthorized from Responses API"
+
+      true ->
+        nil
     end
   end
 

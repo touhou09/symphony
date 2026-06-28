@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Orchestrator do
   import Bitwise, only: [<<<: 2]
 
   alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.Codex.AuthPreflight
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Ticket.ContentCheck
 
@@ -15,7 +16,8 @@ defmodule SymphonyElixir.Orchestrator do
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
-  @runtime_blocker_marker "<!-- symphony-runtime-blocker:no-diff-token-limit -->"
+  @runtime_blocker_marker_pattern ~r/<!--\s*symphony-runtime-blocker:([a-z0-9-]+)\s*-->/i
+  @runtime_blocker_no_diff_marker "<!-- symphony-runtime-blocker:no-diff-token-limit -->"
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -23,6 +25,7 @@ defmodule SymphonyElixir.Orchestrator do
     seconds_running: 0
   }
   @dispatch_claim_ttl_ms 600_000
+  @restart_claim_grace_ms 60_000
   @dispatch_claim_file Path.join([".symphony", "orchestrator-running-claims.json"])
 
   defmodule State do
@@ -234,17 +237,17 @@ defmodule SymphonyElixir.Orchestrator do
         if input_required_blocker?(running_entry) do
           block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
         else
-          Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+          case maybe_run_squad_completion_hook(running_entry) do
+            :ok ->
+              state
+              |> complete_issue(issue_id)
+              |> maybe_schedule_completion_continuation(issue_id, running_entry, session_id)
 
-          state
-          |> complete_issue(issue_id)
-          |> schedule_issue_retry(issue_id, 1, %{
-            identifier: running_entry.identifier,
-            issue_url: running_entry.issue.url,
-            delay_type: :continuation,
-            worker_host: Map.get(running_entry, :worker_host),
-            workspace_path: Map.get(running_entry, :workspace_path)
-          })
+            {:error, error} ->
+              Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}; #{error}")
+
+              block_issue_from_entry(state, issue_id, running_entry, error)
+          end
         end
 
       error ->
@@ -294,6 +297,56 @@ defmodule SymphonyElixir.Orchestrator do
       worker_host: Map.get(running_entry, :worker_host),
       workspace_path: Map.get(running_entry, :workspace_path)
     })
+  end
+
+  defp maybe_schedule_completion_continuation(%State{} = state, issue_id, running_entry, session_id) do
+    if Config.settings!().agent.squad_enabled do
+      Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; squad mode skips active-state continuation retry")
+
+      state
+    else
+      Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+
+      schedule_issue_retry(state, issue_id, 1, %{
+        identifier: running_entry.identifier,
+        issue_url: running_entry.issue.url,
+        delay_type: :continuation,
+        worker_host: Map.get(running_entry, :worker_host),
+        workspace_path: Map.get(running_entry, :workspace_path)
+      })
+    end
+  end
+
+  defp maybe_run_squad_completion_hook(running_entry) do
+    if Config.settings!().agent.squad_enabled do
+      running_entry
+      |> run_completion_hook_result()
+      |> case do
+        :ok -> :ok
+        {:error, reason} -> {:error, completion_hook_blocker_message(reason)}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp run_completion_hook_result(%{workspace_path: workspace_path, issue: issue} = running_entry)
+       when is_binary(workspace_path) do
+    Workspace.run_after_complete_hook_result(workspace_path, issue, Map.get(running_entry, :worker_host))
+  end
+
+  defp run_completion_hook_result(_running_entry), do: :ok
+
+  defp completion_hook_blocker_message({:workspace_hook_failed, hook_name, status, _output}) do
+    "#{hook_name} hook failed before completion handoff: status=#{status}"
+  end
+
+  defp completion_hook_blocker_message({:workspace_hook_timeout, hook_name, timeout_ms}) do
+    "#{hook_name} hook timed out before completion handoff: timeout_ms=#{timeout_ms}"
+  end
+
+  defp completion_hook_blocker_message(reason) do
+    "after_complete hook failed before completion handoff: #{inspect(reason)}"
   end
 
   defp maybe_dispatch(%State{} = state) do
@@ -942,7 +995,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp choose_issues(issues, state) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
-    state = reconcile_queue_with_candidates(state, issues)
+
+    state =
+      state
+      |> prune_expired_running_claims()
+      |> reconcile_queue_with_candidates(issues)
 
     issues
     |> sort_issues_for_dispatch()
@@ -964,7 +1021,10 @@ defmodule SymphonyElixir.Orchestrator do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
 
-    state = reconcile_queue_with_candidates(state, issues)
+    state =
+      state
+      |> prune_expired_running_claims()
+      |> reconcile_queue_with_candidates(issues)
 
     {dispatch_ids, queued_ids, _state} =
       issues
@@ -1007,13 +1067,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp should_queue_issue?(
          %Issue{} = issue,
-         %State{blocked: blocked, running_claims: running_claims, queued: queued},
+         %State{blocked: blocked, completed: completed, running_claims: running_claims, queued: queued},
          active_states,
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
       !Map.has_key?(blocked, issue.id) and
+      !MapSet.member?(completed, issue.id) and
       !Map.has_key?(running_claims, issue.id) and
       !queued_issue?(issue.id, queued)
   end
@@ -1085,6 +1146,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     running_claims =
       running_claims
+      |> prune_expired_running_claims()
       |> Enum.reject(fn {issue_id, _deadline} ->
         !MapSet.member?(eligible_claim_ids, issue_id)
       end)
@@ -1119,6 +1181,7 @@ defmodule SymphonyElixir.Orchestrator do
            running: running,
            claimed: claimed,
            blocked: blocked,
+           completed: completed,
            running_claims: running_claims
          } = state,
          active_states,
@@ -1127,6 +1190,7 @@ defmodule SymphonyElixir.Orchestrator do
     candidate_issue?(issue, active_states, terminal_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
       !MapSet.member?(claimed, issue.id) and
+      !MapSet.member?(completed, issue.id) and
       !Map.has_key?(running, issue.id) and
       !Map.has_key?(running_claims, issue.id) and
       !Map.has_key?(blocked, issue.id) and
@@ -1341,7 +1405,16 @@ defmodule SymphonyElixir.Orchestrator do
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
 
   defp preflight_issue_for_dispatch(%Issue{} = issue) do
-    with :ok <- ticket_preflight_issue(issue), do: runtime_blocker_preflight(issue)
+    with :ok <- ticket_preflight_issue(issue),
+         :ok <- codex_auth_preflight(),
+         do: runtime_blocker_preflight(issue)
+  end
+
+  defp codex_auth_preflight do
+    case AuthPreflight.check(Config.settings!().codex) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:runtime_blocker, reason}}
+    end
   end
 
   defp ticket_preflight_issue(%Issue{} = issue) do
@@ -1376,10 +1449,17 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp runtime_blocker_comment_result(comments) do
-    if Enum.any?(comments, &(comment_body(&1) |> String.contains?(@runtime_blocker_marker))) do
-      {:error, {:runtime_blocker, "runtime blocker persisted on tracker workpad: no-diff token limit"}}
-    else
-      :ok
+    case Enum.find_value(comments, &(comment_body(&1) |> runtime_blocker_comment_type())) do
+      nil -> :ok
+      "codex authentication" -> codex_auth_runtime_blocker_result()
+      blocker_type -> {:error, {:runtime_blocker, "runtime blocker persisted on tracker workpad: #{blocker_type}"}}
+    end
+  end
+
+  defp codex_auth_runtime_blocker_result do
+    case codex_auth_preflight() do
+      :ok -> :ok
+      {:error, {:runtime_blocker, reason}} -> {:error, {:runtime_blocker, "runtime blocker persisted on tracker workpad: codex authentication; #{reason}"}}
     end
   end
 
@@ -1459,7 +1539,7 @@ defmodule SymphonyElixir.Orchestrator do
       is_nil(comment_id) ->
         create_runtime_blocker_comment(issue_id, blocker_body)
 
-      String.contains?(body, @runtime_blocker_marker) ->
+      runtime_blocker_marker_present?(body) ->
         :ok
 
       true ->
@@ -1485,7 +1565,7 @@ defmodule SymphonyElixir.Orchestrator do
     timestamp = DateTime.utc_now() |> DateTime.to_iso8601()
 
     """
-    #{@runtime_blocker_marker}
+    #{runtime_blocker_marker(error)}
     ### Runtime Blocker
 
     - Type: #{runtime_blocker_type(error)}
@@ -1499,7 +1579,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp runtime_blocker_type(error) when is_binary(error) do
     cond do
-      String.contains?(error, "codex authentication failed") -> "codex authentication"
+      String.contains?(error, "codex authentication") -> "codex authentication"
+      String.contains?(error, "mcp authentication failed") -> "mcp authentication"
+      String.contains?(error, "mcp authorization failed") -> "mcp authorization"
       String.contains?(error, "squad evidence contract failed") -> "squad evidence contract"
       String.contains?(error, "total token limit") -> "total token limit"
       String.contains?(error, "no-diff token limit") -> "no-diff token limit"
@@ -1508,6 +1590,70 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp runtime_blocker_type(_error), do: "runtime blocker"
+
+  defp runtime_blocker_marker(error) do
+    error
+    |> runtime_blocker_type()
+    |> runtime_blocker_marker_for_type()
+  end
+
+  defp runtime_blocker_marker_for_type("total token limit"), do: "<!-- symphony-runtime-blocker:total-token-limit -->"
+  defp runtime_blocker_marker_for_type("no-diff token limit"), do: @runtime_blocker_no_diff_marker
+  defp runtime_blocker_marker_for_type("codex authentication"), do: "<!-- symphony-runtime-blocker:codex-authentication -->"
+  defp runtime_blocker_marker_for_type("mcp authentication"), do: "<!-- symphony-runtime-blocker:mcp-authentication -->"
+  defp runtime_blocker_marker_for_type("mcp authorization"), do: "<!-- symphony-runtime-blocker:mcp-authorization -->"
+
+  defp runtime_blocker_marker_for_type("squad evidence contract"),
+    do: "<!-- symphony-runtime-blocker:squad-evidence-contract -->"
+
+  defp runtime_blocker_marker_for_type(_type), do: "<!-- symphony-runtime-blocker:runtime -->"
+
+  defp runtime_blocker_marker_present?(body) when is_binary(body), do: Regex.match?(@runtime_blocker_marker_pattern, body)
+
+  defp runtime_blocker_comment_type(body) when is_binary(body) do
+    cond do
+      not runtime_blocker_marker_present?(body) ->
+        nil
+
+      String.contains?(body, "Type: total token limit") ->
+        "total token limit"
+
+      String.contains?(body, "Type: no-diff token limit") ->
+        "no-diff token limit"
+
+      String.contains?(body, "Type: codex authentication") ->
+        "codex authentication"
+
+      String.contains?(body, "Type: mcp authentication") ->
+        "mcp authentication"
+
+      String.contains?(body, "Type: mcp authorization") ->
+        "mcp authorization"
+
+      String.contains?(body, "Type: squad evidence contract") ->
+        "squad evidence contract"
+
+      true ->
+        body
+        |> runtime_blocker_marker_kind()
+        |> runtime_blocker_type_for_marker_kind()
+    end
+  end
+
+  defp runtime_blocker_marker_kind(body) when is_binary(body) do
+    case Regex.run(@runtime_blocker_marker_pattern, body) do
+      [_, kind] -> String.downcase(kind)
+      _ -> nil
+    end
+  end
+
+  defp runtime_blocker_type_for_marker_kind("total-token-limit"), do: "total token limit"
+  defp runtime_blocker_type_for_marker_kind("no-diff-token-limit"), do: "no-diff token limit"
+  defp runtime_blocker_type_for_marker_kind("codex-authentication"), do: "codex authentication"
+  defp runtime_blocker_type_for_marker_kind("mcp-authentication"), do: "mcp authentication"
+  defp runtime_blocker_type_for_marker_kind("mcp-authorization"), do: "mcp authorization"
+  defp runtime_blocker_type_for_marker_kind("squad-evidence-contract"), do: "squad evidence contract"
+  defp runtime_blocker_type_for_marker_kind(_kind), do: "runtime blocker"
 
   defp comment_body(%{"body" => body}) when is_binary(body), do: body
   defp comment_body(%{body: body}) when is_binary(body), do: body
@@ -1721,7 +1867,12 @@ defmodule SymphonyElixir.Orchestrator do
     with {:ok, body} <- File.read(@dispatch_claim_file),
          {:ok, claims} <- Jason.decode(body),
          normalized_claims <- normalize_running_claims(claims) do
-      %{state | running_claims: touch_running_claims(normalized_claims)}
+      recovered_claims =
+        normalized_claims
+        |> prune_expired_running_claims()
+        |> cap_recovered_running_claims()
+
+      %{state | running_claims: recovered_claims}
     else
       {:error, :enoent} ->
         state
@@ -1761,25 +1912,70 @@ defmodule SymphonyElixir.Orchestrator do
       state
   end
 
-  defp touch_running_claims(%State{running_claims: running_claims} = state) when is_map(running_claims) do
-    %{state | running_claims: touch_running_claims(running_claims)}
+  defp touch_running_claims(%State{running_claims: running_claims, running: running} = state)
+       when is_map(running_claims) and is_map(running) do
+    %{state | running_claims: touch_running_claims(running_claims, running)}
   end
 
   defp touch_running_claims(%State{} = state), do: state
 
-  defp touch_running_claims(running_claims) when is_map(running_claims) do
+  defp touch_running_claims(running_claims, running) when is_map(running_claims) and is_map(running) do
+    now_ms = System.system_time(:millisecond)
     renewed_until_ms = System.system_time(:millisecond) + dispatch_claim_ttl()
+    running_issue_ids = running |> Map.keys() |> MapSet.new()
+
+    running_claims
+    |> Enum.reduce(%{}, fn {issue_id, expiry_ms}, acc ->
+      cond do
+        not valid_running_claim_expiry?(expiry_ms) ->
+          acc
+
+        MapSet.member?(running_issue_ids, issue_id) ->
+          Map.put(acc, issue_id, renewed_until_ms)
+
+        expiry_ms > now_ms ->
+          Map.put(acc, issue_id, expiry_ms)
+
+        true ->
+          acc
+      end
+    end)
+  end
+
+  defp touch_running_claims(_running_claims, _running), do: %{}
+
+  defp prune_expired_running_claims(%State{running_claims: running_claims} = state) when is_map(running_claims) do
+    %{state | running_claims: prune_expired_running_claims(running_claims)}
+  end
+
+  defp prune_expired_running_claims(%State{} = state), do: state
+
+  defp prune_expired_running_claims(running_claims) when is_map(running_claims) do
+    now_ms = System.system_time(:millisecond)
 
     running_claims
     |> Enum.filter(fn {_issue_id, expiry_ms} ->
-      is_integer(expiry_ms) and expiry_ms > 0
+      valid_running_claim_expiry?(expiry_ms) and expiry_ms > now_ms
     end)
-    |> Map.new(fn {issue_id, _expiry_ms} -> {issue_id, renewed_until_ms} end)
+    |> Map.new()
   end
 
-  defp touch_running_claims(_running_claims), do: %{}
+  defp prune_expired_running_claims(_running_claims), do: %{}
+
+  defp cap_recovered_running_claims(running_claims) when is_map(running_claims) do
+    recovered_until_ms = System.system_time(:millisecond) + restart_claim_grace()
+
+    Map.new(running_claims, fn {issue_id, expiry_ms} ->
+      {issue_id, min(expiry_ms, recovered_until_ms)}
+    end)
+  end
+
+  defp cap_recovered_running_claims(_running_claims), do: %{}
+
+  defp valid_running_claim_expiry?(expiry_ms), do: is_integer(expiry_ms) and expiry_ms > 0
 
   defp dispatch_claim_ttl, do: @dispatch_claim_ttl_ms
+  defp restart_claim_grace, do: @restart_claim_grace_ms
 
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
     if metadata[:delay_type] == :continuation and attempt == 1 do
@@ -1931,12 +2127,28 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp active_issue_slot_count(%State{running: running, running_claims: running_claims})
        when is_map(running) and is_map(running_claims) do
-    MapSet.union(MapSet.new(Map.keys(running)), MapSet.new(Map.keys(running_claims)))
+    active_claims =
+      running_claims
+      |> prune_expired_running_claims()
+      |> Map.keys()
+
+    MapSet.union(MapSet.new(Map.keys(running)), MapSet.new(active_claims))
     |> MapSet.size()
   end
 
   defp active_issue_slot_count(%State{} = state) do
-    map_size(state.running) + map_size(state.running_claims)
+    running_count = if is_map(state.running), do: map_size(state.running), else: 0
+
+    running_claim_count =
+      if is_map(state.running_claims) do
+        state.running_claims
+        |> prune_expired_running_claims()
+        |> map_size()
+      else
+        0
+      end
+
+    running_count + running_claim_count
   end
 
   @spec request_refresh() :: map() | :unavailable
@@ -2043,6 +2255,7 @@ defmodule SymphonyElixir.Orchestrator do
          max_active_issues: active_issue_limit(state),
          active_issue_slots: active_issue_slot_count(state),
          active_slots_remaining: available_slots(state),
+         blocked_count: map_size(state.blocked),
          queued_count: length(state.queued),
          queued: state.queued
        },

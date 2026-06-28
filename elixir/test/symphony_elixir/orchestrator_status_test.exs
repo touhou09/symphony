@@ -1249,6 +1249,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert_receive {:memory_tracker_comments_requested, ^issue_id}
     assert_receive {:memory_tracker_comment_update, ^issue_id, "comment-1", blocker_body}
+    assert blocker_body =~ "<!-- symphony-runtime-blocker:total-token-limit -->"
+    refute blocker_body =~ "<!-- symphony-runtime-blocker:no-diff-token-limit -->"
     assert blocker_body =~ "Type: total token limit"
     assert blocker_body =~ "codex exceeded total token limit"
     assert blocker_body =~ workspace_path
@@ -1452,7 +1454,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_nil(state.retry_attempts[issue_id])
     assert_receive {:memory_tracker_comments_requested, ^issue_id}
     assert_receive {:memory_tracker_comment_update, ^issue_id, "comment-1", blocker_body}
-    assert blocker_body =~ "<!-- symphony-runtime-blocker:no-diff-token-limit -->"
+    assert blocker_body =~ "<!-- symphony-runtime-blocker:runtime -->"
   end
 
   test "poll cycle blocks no-diff workers when workspace status is unavailable" do

@@ -577,6 +577,38 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert queued_ids == ["MT-302"]
   end
 
+  test "dispatch plan skips completed candidates without requeueing them" do
+    state =
+      orchestrator_state_for_test(
+        max_active_issues: 1,
+        completed: MapSet.new(["MT-303"]),
+        max_concurrent_agents: 10
+      )
+
+    issues =
+      [
+        {"MT-303", 1, ~U[2026-01-01 00:00:00Z]},
+        {"MT-301", 1, ~U[2026-01-02 00:00:00Z]}
+      ]
+      |> Enum.map(fn {identifier, priority, created_at} ->
+        %Issue{
+          id: identifier,
+          identifier: identifier,
+          title: "#{identifier} completed queue test",
+          state: "Todo",
+          priority: priority,
+          created_at: created_at,
+          labels: ["symphony"]
+        }
+      end)
+
+    %{dispatch: dispatch_ids, queued: queued_ids} =
+      Orchestrator.dispatch_plan_for_test(issues, state)
+
+    assert dispatch_ids == ["MT-301"]
+    assert queued_ids == []
+  end
+
   test "dispatch plan refills queued candidates after an active slot is released" do
     state =
       orchestrator_state_for_test(
@@ -622,7 +654,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert queued_ids_after_release == []
   end
 
-  test "persisted restart claims are renewed and keep their active slot" do
+  test "expired persisted restart claims are pruned and release their active slot" do
     File.mkdir_p!(".symphony")
     claims_path = Path.join([".symphony", "orchestrator-running-claims.json"])
     File.write!(claims_path, Jason.encode!(%{"MT-303" => System.system_time(:millisecond) - 60_000}))
@@ -636,7 +668,52 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     on_exit(fn -> File.rm(claims_path) end)
 
-    assert state.running_claims["MT-303"] > System.system_time(:millisecond)
+    assert state.running_claims == %{}
+
+    issues =
+      [
+        {"MT-303", 1, ~U[2026-01-01 00:00:00Z]},
+        {"MT-301", 1, ~U[2026-01-02 00:00:00Z]}
+      ]
+      |> Enum.map(fn {identifier, priority, created_at} ->
+        %Issue{
+          id: identifier,
+          identifier: identifier,
+          title: "#{identifier} restart claim test",
+          state: "Todo",
+          priority: priority,
+          created_at: created_at,
+          labels: ["symphony"]
+        }
+      end)
+
+    %{dispatch: dispatch_ids, queued: queued_ids} =
+      Orchestrator.dispatch_plan_for_test(issues, state)
+
+    assert dispatch_ids == ["MT-303"]
+    assert queued_ids == ["MT-301"]
+  end
+
+  test "unexpired persisted restart claims keep their active slot with recovery grace cap" do
+    File.mkdir_p!(".symphony")
+    claims_path = Path.join([".symphony", "orchestrator-running-claims.json"])
+    now_ms = System.system_time(:millisecond)
+    expires_at = now_ms + 600_000
+    File.write!(claims_path, Jason.encode!(%{"MT-303" => expires_at}))
+
+    state =
+      orchestrator_state_for_test(
+        max_active_issues: 1,
+        max_concurrent_agents: 10
+      )
+      |> Orchestrator.load_running_claims_for_test()
+
+    on_exit(fn -> File.rm(claims_path) end)
+
+    recovered_expires_at = state.running_claims["MT-303"]
+    assert is_integer(recovered_expires_at)
+    assert recovered_expires_at > now_ms
+    assert recovered_expires_at <= System.system_time(:millisecond) + 61_000
 
     issues =
       [
@@ -1705,6 +1782,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   defp orchestrator_state_for_test(opts \\ []) do
     max_active_issues = Keyword.get(opts, :max_active_issues, 1)
     running_claims = Keyword.get(opts, :running_claims, %{})
+    completed = Keyword.get(opts, :completed, MapSet.new())
 
     %Orchestrator.State{
       max_active_issues: max_active_issues,
@@ -1712,6 +1790,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       running_claims: running_claims,
       running: %{},
       claimed: MapSet.new(),
+      completed: completed,
       retry_attempts: %{},
       codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
     }

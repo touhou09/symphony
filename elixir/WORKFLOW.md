@@ -2,7 +2,8 @@
 tracker:
   kind: jira
   project_slug: "SYM"
-  required_labels: []
+  required_labels:
+    - symphony-e2e
   active_states:
     - "\uBBF8\uD574\uACB0"
     - "\uB2E4\uC2DC \uC5F4\uB9BC"
@@ -59,7 +60,7 @@ hooks:
     cd elixir && mix workspace.before_remove
 agent:
   max_concurrent_agents: 10
-  max_active_issues: 3
+  max_active_issues: 1
   max_turns: 20
   squad_enabled: true
   model_roles:
@@ -76,8 +77,11 @@ codex:
   thread_sandbox: danger-full-access
   turn_sandbox_policy:
     type: dangerFullAccess
-  max_total_tokens: 1500000
+  max_total_tokens: 0
   max_no_diff_tokens: 0
+  auth_preflight_enabled: true
+  auth_json_path: /root/.codex/auth.json
+  auth_max_age_ms: 0
 ---
 
 You are working on a Jira issue `{{ issue.identifier }}`
@@ -157,7 +161,7 @@ The agent should use the issue context supplied by Symphony and the configured t
 - `sym-jira-ticket`: create or validate SYM Jira ticket bodies before dispatch.
 - `commit`: produce clean, logical commits during implementation.
 - `push`: keep remote branch current and publish updates.
-- `pull`: keep branch updated with latest `origin/main` before handoff.
+- `pull`: keep branch updated with the configured PR base before handoff (`origin/${SYMPHONY_PR_BASE:-dev}` by default).
 
 ## SYM Jira Status Map
 
@@ -180,7 +184,7 @@ The agent should use the issue context supplied by Symphony and the configured t
    - `취소` -> do nothing and shut down as canceled work.
 4. Check whether a PR already exists for the current branch and whether it is closed.
    - If a branch PR exists and is `CLOSED` or `MERGED`, treat prior branch work as non-reusable for this run.
-   - Create a fresh branch from `origin/main` and restart execution flow as a new attempt.
+   - Create a fresh branch from the configured PR base (`origin/${SYMPHONY_PR_BASE:-dev}` by default) and restart execution flow as a new attempt.
 5. For active intake tickets, do startup sequencing in this exact order:
    - transition to `진행 중` when available
    - find/create `## Codex Workpad` bootstrap comment
@@ -211,7 +215,7 @@ The agent should use the issue context supplied by Symphony and the configured t
     - If the ticket description/comment context includes `Validation`, `Test Plan`, or `Testing` sections, copy those requirements into the workpad `Acceptance Criteria` and `Validation` sections as required checkboxes (no optional downgrade).
 7.  Run a principal-style self-review of the plan and refine it in the comment.
 8.  Before implementing, capture a concrete reproduction signal and record it in the workpad `Notes` section (command/output, screenshot, or deterministic UI behavior).
-9.  Run the `pull` skill to sync with latest `origin/main` before any code edits, then record the pull/sync result in the workpad `Notes`.
+9.  Run the `pull` skill to sync with the configured PR base (`origin/${SYMPHONY_PR_BASE:-dev}` by default) before any code edits, then record the pull/sync result in the workpad `Notes`.
     - Include a `pull skill evidence` note with:
       - merge source(s),
       - result (`clean` or `conflicts resolved`),
@@ -220,7 +224,7 @@ The agent should use the issue context supplied by Symphony and the configured t
 
 ## PR feedback sweep protocol (required)
 
-When a ticket has an attached PR, run this protocol before moving to `Human Review`:
+When a ticket has an attached PR, run this protocol before successful terminal handoff:
 
 1. Identify the PR number from issue links/attachments.
 2. Gather feedback from all channels:
@@ -239,14 +243,14 @@ When a ticket has an attached PR, run this protocol before moving to `Human Revi
 Use this only when completion is blocked by missing required tools or missing auth/permissions that cannot be resolved in-session.
 
 - GitHub is **not** a valid blocker by default. Always try fallback strategies first (alternate remote/auth mode, then continue publish/review flow).
-- Do not move to `Human Review` for GitHub access/auth until all fallback strategies have been attempted and documented in the workpad.
-- If a non-GitHub required tool is missing, or required non-GitHub auth is unavailable, move the ticket to `Human Review` with a short blocker brief in the workpad that includes:
+- Do not move to a successful terminal state for GitHub access/auth until all fallback strategies have been attempted and documented in the workpad.
+- If a non-GitHub required tool is missing, or required non-GitHub auth is unavailable, move the ticket to `Pending` when that transition is available and leave a short blocker brief in the workpad that includes:
   - what is missing,
   - why it blocks required acceptance/validation,
   - exact human action needed to unblock.
 - Keep the brief concise and action-oriented; do not add extra top-level comments outside the workpad.
 
-## Step 2: Execution phase (Todo -> In Progress -> Human Review)
+## Step 2: Execution phase (Todo -> In Progress -> successful terminal handoff)
 
 1.  Determine current repo state (`branch`, `git status`, `HEAD`) and verify the kickoff `pull` sync result is already recorded in the workpad before implementation continues.
 2.  If current issue state is `Todo`, move it to `In Progress`; otherwise leave the current state unchanged.
@@ -271,35 +275,35 @@ Use this only when completion is blocked by missing required tools or missing au
 8.  Attach PR URL to the issue (prefer attachment; use the workpad comment only if attachment is unavailable).
     - Ensure the GitHub PR has label `symphony` (add it if missing).
     - A completed ticket must leave behind a pushed branch and an open PR before it leaves active execution. If the agent cannot create the PR directly, it must leave the branch pushed so the `after_complete` hook can create or discover the PR.
-9.  Merge latest `origin/main` into branch, resolve conflicts, and rerun checks.
+9.  Merge latest configured PR base (`origin/${SYMPHONY_PR_BASE:-dev}` by default) into branch, resolve conflicts, and rerun checks.
 10. Update the workpad comment with final checklist status and validation notes.
     - Mark completed plan/acceptance/validation checklist items as checked.
     - Add final handoff notes (commit + validation summary) in the same workpad comment.
     - Do not include PR URL in the workpad comment; keep PR linkage on the issue via attachment/link fields.
     - Add a short `### Confusions` section at the bottom when any part of task execution was unclear/confusing, with concise bullets.
     - Do not post any additional completion summary comment.
-11. Before moving to `Human Review`, poll PR feedback and checks:
+11. Before successful terminal handoff, poll PR feedback and checks:
     - Read the PR `Manual QA Plan` comment (when present) and use it to sharpen UI/runtime test coverage for the current change.
     - Run the full PR feedback sweep protocol.
     - Confirm PR checks are passing (green) after the latest changes.
+    - Once PR checks are green for the latest head, freeze repository state for handoff: do not make another commit, push, or PR body update solely to record that green status.
+    - Record volatile final-head/check evidence in the tracker workpad or final role message, not in repository files such as `docs/codex-squad-evidence.md`. A repository mutation after green is allowed only for a substantive code, docs, test, or review issue, and it restarts validation/push/check polling.
     - Confirm every required ticket-provided validation/test-plan item is explicitly marked complete in the workpad.
     - Repeat this check-address-verify loop until no outstanding comments remain and checks are fully passing.
     - Re-open and refresh the workpad before state transition so `Plan`, `Acceptance Criteria`, and `Validation` exactly match completed work.
-12. Only then move issue to `Human Review`.
-    - Exception: if blocked by missing required non-GitHub tools/auth per the blocked-access escape hatch, move to `Human Review` with the blocker brief and explicit unblock actions.
+12. Only then move issue to a successful terminal state by requesting generic `Done`; on SYM Jira this should prefer `해결됨`/`완료` over `취소`.
+    - Exception: if blocked by missing required non-GitHub tools/auth per the blocked-access escape hatch, move to `Pending` when available with the blocker brief and explicit unblock actions.
 13. For `Todo` tickets that already had a PR attached at kickoff:
     - Ensure all existing PR feedback was reviewed and resolved, including inline review comments (code changes or explicit, justified pushback response).
     - Ensure branch was pushed with any required updates.
-    - Then move to `Human Review`.
+    - Then move to a successful terminal state by requesting generic `Done`.
 
-## Step 3: Human Review and merge handling
+## Step 3: Terminal handoff and merge handling
 
-1. When the issue is in `Human Review`, do not code or change ticket content.
-2. Poll for updates as needed, including GitHub PR review comments from humans and bots.
-3. If review feedback requires changes, move the issue to `Rework` and follow the rework flow.
-4. If approved, human moves the issue to `Merging`.
-5. When the issue is in `Merging`, open and follow `.codex/skills/land/SKILL.md`, then run the `land` skill in a loop until the PR is merged. Do not call `gh pr merge` directly.
-6. After merge is complete, move the issue to `Done`.
+1. When the issue is in a successful terminal state (`완료`, `완료됨`, `종료`, `해결됨`), do not code or change ticket content.
+2. If a human explicitly moves the issue back to an active rework state, follow the rework flow.
+3. If a human explicitly moves the issue to a merge state, open and follow `.codex/skills/land/SKILL.md`, then run the `land` skill in a loop until the PR is merged. Do not call `gh pr merge` directly.
+4. After merge is complete, ensure the issue remains in a successful terminal state by requesting generic `Done`.
 
 ## Step 4: Rework handling
 
@@ -307,13 +311,13 @@ Use this only when completion is blocked by missing required tools or missing au
 2. Re-read the full issue body and all human comments; explicitly identify what will be done differently this attempt.
 3. Close the existing PR tied to the issue.
 4. Remove the existing `## Codex Workpad` comment from the issue.
-5. Create a fresh branch from `origin/main`.
+5. Create a fresh branch from the configured PR base (`origin/${SYMPHONY_PR_BASE:-dev}` by default).
 6. Start over from the normal kickoff flow:
    - If current issue state is `Todo`, move it to `In Progress`; otherwise keep the current state.
    - Create a new bootstrap `## Codex Workpad` comment.
    - Build a fresh plan/checklist and execute end-to-end.
 
-## Completion bar before Human Review
+## Completion bar before successful terminal handoff
 
 - Step 1/2 checklist is fully complete and accurately reflected in the single workpad comment.
 - Acceptance criteria and required ticket-provided validation items are complete.
@@ -326,7 +330,7 @@ Use this only when completion is blocked by missing required tools or missing au
 ## Guardrails
 
 - If the branch PR is already closed/merged, do not reuse that branch or prior implementation state for continuation.
-- For closed/merged branch PRs, create a new branch from `origin/main` and restart from reproduction/planning as if starting fresh.
+- For closed/merged branch PRs, create a new branch from the configured PR base (`origin/${SYMPHONY_PR_BASE:-dev}` by default) and restart from reproduction/planning as if starting fresh.
 - If issue state is `Backlog`, do not modify it; wait for human to move to `Todo`.
 - Do not edit the issue body/description for planning or progress tracking.
 - Use exactly one persistent workpad comment (`## Codex Workpad`) per issue.
@@ -337,8 +341,7 @@ Use this only when completion is blocked by missing required tools or missing au
   title/description/acceptance criteria, same-project assignment, a `related`
   link to the current issue, and `blockedBy` when the follow-up depends on the
   current issue.
-- Do not move to `Human Review` unless the `Completion bar before Human Review` is satisfied.
-- In `Human Review`, do not make changes; wait and poll.
+- Do not move to a successful terminal state unless the `Completion bar before successful terminal handoff` is satisfied.
 - If state is terminal (`Done`), do nothing and shut down.
 - Keep issue text concise, specific, and reviewer-oriented.
 - If blocked and no workpad exists yet, add one blocker comment describing blocker, impact, and next unblock action.

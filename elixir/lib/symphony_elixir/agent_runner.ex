@@ -272,6 +272,7 @@ defmodule SymphonyElixir.AgentRunner do
     - `cto`: first create or refresh `#{@squad_evidence_path}` with `## Scope` and `## CTO Plan`; define bounded implementation and validation criteria.
     - `implementer`: first create a failing/regression test or the smallest code/docs edit in the workspace (excluding `#{@squad_evidence_path}`), then implement the scoped changes and write `## Implementation` with role/model/result. The first edit path must be explicit and verifiable in evidence.
     - verifier roles: first append a verification note to `#{@squad_evidence_path}`, inspect the diff and evidence, run targeted validation, then add a `## Verification` checklist row exactly containing the verifier role, configured model, and `PASS` or `FAIL`.
+    #{final_verifier_freeze_contract(role)}
 
     No-diff contract:
     - Tracker workpad-only progress is not implementation progress. If no safe first file edit exists, write a `### Runtime Blocker` comment with the concrete blocker and stop before extended analysis.
@@ -282,6 +283,19 @@ defmodule SymphonyElixir.AgentRunner do
     - If this role cannot complete, update the tracker workpad with the concrete blocker and stop instead of guessing.
     """
   end
+
+  defp final_verifier_freeze_contract("final_verifier") do
+    """
+
+    Final-verifier publish freeze:
+    - Before polling PR checks for the final head, finish all required repository edits, including the `## Verification` PASS/FAIL row and any PR body updates, then commit and push them once.
+    - After PR checks are observed green for the current head, treat that commit SHA as frozen. Do not edit workspace files, update the PR body, commit, or push only to record the green check result.
+    - Record final head/check evidence in the tracker workpad or final role message, not in `#{@squad_evidence_path}`. In particular, do not append lines such as `final head ... GitHub Actions ... success` after checks are already green.
+    - If a real code, docs, test, or review issue appears after green, address that substantive issue and restart validation; otherwise stop and hand off without creating another repository diff.
+    """
+  end
+
+  defp final_verifier_freeze_contract(_role), do: ""
 
   defp verify_implementer_turn_progress(:skip, _workspace), do: :ok
 
@@ -404,14 +418,49 @@ defmodule SymphonyElixir.AgentRunner do
   defp validate_squad_evidence(workspace) do
     evidence_path = Path.join(workspace, @squad_evidence_path)
 
-    case EvidenceCheck.validate_file(evidence_path, Config.squad_prompt_context()) do
-      :ok -> :ok
-      {:error, errors} -> {:error, {:runtime_blocker, squad_evidence_blocker_message(errors)}}
+    case File.read(evidence_path) do
+      {:ok, markdown} ->
+        case EvidenceCheck.validate(markdown, Config.squad_prompt_context()) do
+          :ok -> :ok
+          {:error, errors} -> {:error, {:runtime_blocker, squad_evidence_blocker_message(errors, markdown)}}
+        end
+
+      {:error, reason} ->
+        {:error, {:runtime_blocker, squad_evidence_blocker_message(["unable to read #{evidence_path}: #{inspect(reason)}"], "")}}
     end
   end
 
-  defp squad_evidence_blocker_message(errors) when is_list(errors) do
-    "squad evidence contract failed: " <> Enum.join(errors, "; ")
+  defp squad_evidence_blocker_message(errors, markdown) when is_list(errors) and is_binary(markdown) do
+    base = "squad evidence contract failed: " <> Enum.join(errors, "; ")
+
+    case first_squad_fail_reason(markdown) do
+      nil -> base
+      reason -> base <> "; first FAIL reason: " <> reason
+    end
+  end
+
+  defp first_squad_fail_reason(markdown) do
+    markdown
+    |> String.split("\n")
+    |> Enum.find_value(fn line ->
+      case Regex.run(~r/\bFAIL\b\s*(?:[-:]\s*)?(?<reason>.+)$/i, line, capture: ["reason"]) do
+        [reason] -> sanitize_fail_reason(reason)
+        _ -> nil
+      end
+    end)
+  end
+
+  defp sanitize_fail_reason(reason) when is_binary(reason) do
+    reason =
+      reason
+      |> String.replace(~r/[\x00-\x1F\x7F]+/, " ")
+      |> String.replace(~r/\b(?:ghp|github_pat|glpat|cfat|sk|xox[baprs])_[A-Za-z0-9_\-]+/i, "[REDACTED]")
+      |> String.replace(~r/(authorization:\s*bearer\s+)[^\s,;]+/i, "\\1[REDACTED]")
+      |> String.replace(~r/((?:token|api[_-]?key|password|secret)=)[^\s,;]+/i, "\\1[REDACTED]")
+      |> String.trim()
+      |> String.slice(0, 240)
+
+    if reason == "", do: nil, else: reason
   end
 
   defp codex_command_for_model(command, model) when is_binary(command) and is_binary(model) do

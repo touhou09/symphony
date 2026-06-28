@@ -29,6 +29,23 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "cd elixir && mix squad.check --file ../docs/codex-squad-evidence.md --workflow WORKFLOW.md"
   end
 
+  test "final verifier prompt freezes repository after green PR checks" do
+    issue = %Issue{
+      id: "10711",
+      identifier: "SYM-33",
+      title: "Stop final verifier green-check loop",
+      description: "## Background\nFinal verifier should not create another commit after checks are green."
+    }
+
+    prompt = AgentRunner.squad_role_prompt_for_test(issue, "final_verifier", "gpt-5.5", 4, 4)
+
+    assert prompt =~ "Final-verifier publish freeze"
+    assert prompt =~ "After PR checks are observed green for the current head"
+    assert prompt =~ "Do not edit workspace files, update the PR body, commit, or push"
+    assert prompt =~ "not in `docs/codex-squad-evidence.md`"
+    assert prompt =~ "final head ... GitHub Actions ... success"
+  end
+
   test "implementer workspace progress requires non-evidence file edits" do
     workspace =
       Path.join(System.tmp_dir!(), "symphony-implementer-no-diff-guard-#{System.unique_integer([:positive, :monotonic])}")
@@ -210,6 +227,12 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(agent, "required_verifiers") == ["verifier", "final_verifier"]
 
     assert String.trim(prompt) != ""
+    assert prompt =~ "freeze repository state for handoff"
+    assert prompt =~ "not in repository files such as `docs/codex-squad-evidence.md`"
+    assert prompt =~ "origin/${SYMPHONY_PR_BASE:-dev}"
+    assert prompt =~ "move issue to a successful terminal state by requesting generic `Done`"
+    refute prompt =~ "move issue to `Human Review`"
+    refute prompt =~ "Merge latest `origin/main`"
     assert is_binary(Config.workflow_prompt())
     assert Config.workflow_prompt() == prompt
   end
@@ -901,6 +924,125 @@ defmodule SymphonyElixir.CoreTest do
     assert_due_in_range(due_at_ms, 500, 1_100)
   end
 
+  test "squad normal worker exit runs after_complete hook and completes without active-state continuation retry" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-squad-complete-hook-#{System.unique_integer([:positive])}"
+      )
+
+    issue_identifier = "MT-564"
+    workspace = Path.join(test_root, issue_identifier)
+    hook_output = Path.join(test_root, "after-complete.txt")
+
+    File.mkdir_p!(workspace)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      squad_enabled: true,
+      hook_after_complete: "printf '%s' squad-after-complete > #{hook_output}"
+    )
+
+    issue_id = "issue-squad-complete"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :SquadCompletionOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue_identifier,
+      issue: %Issue{id: issue_id, identifier: issue_identifier, state: "In Progress"},
+      workspace_path: workspace,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    assert MapSet.member?(state.completed, issue_id)
+    assert File.read!(hook_output) == "squad-after-complete"
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    refute MapSet.member?(state.claimed, issue_id)
+
+    File.rm_rf(test_root)
+  end
+
+  test "squad normal worker exit blocks when after_complete hook fails" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-squad-complete-hook-fail-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-squad-complete-hook-fail"
+    issue_identifier = "MT-565"
+    workspace = Path.join(test_root, issue_identifier)
+
+    File.mkdir_p!(workspace)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      squad_enabled: true,
+      hook_after_complete: "exit 17"
+    )
+
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :SquadCompletionHookFailureOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      File.rm_rf(test_root)
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue_identifier,
+      issue: %Issue{id: issue_id, identifier: issue_identifier, state: "In Progress"},
+      workspace_path: workspace,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute MapSet.member?(state.completed, issue_id)
+    assert %{error: error, workspace_path: ^workspace} = state.blocked[issue_id]
+    assert error =~ "after_complete hook failed before completion handoff"
+    assert error =~ "status=17"
+    assert MapSet.member?(state.claimed, issue_id)
+  end
+
   test "abnormal worker exit increments retry attempt progressively" do
     issue_id = "issue-crash"
     ref = make_ref()
@@ -1334,6 +1476,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "This is an unattended orchestration session."
     assert prompt =~ "Only stop early for a true blocker"
     assert prompt =~ "Do not include \"next steps for user\""
+    assert prompt =~ "freeze repository state for handoff"
     assert prompt =~ "open and follow `.codex/skills/land/SKILL.md`"
     assert prompt =~ "Do not call `gh pr merge` directly"
     assert prompt =~ "Continuation context:"
@@ -1525,6 +1668,7 @@ defmodule SymphonyElixir.CoreTest do
       assert message =~ "squad evidence contract failed"
       assert message =~ "## Verification must include PASS for verifier (gpt-5.4)"
       assert message =~ "## Verification must include PASS for final_verifier (gpt-5.5)"
+      assert message =~ "first FAIL reason: intentionally failing row."
     after
       File.rm_rf(test_root)
     end

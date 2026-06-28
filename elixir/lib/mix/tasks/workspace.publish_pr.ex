@@ -50,13 +50,17 @@ defmodule Mix.Tasks.Workspace.PublishPr do
     commit_message = opts[:commit_message] || title
     body = opts[:body] || default_body(branch)
 
-    ensure_git_identity!()
-    maybe_commit_changes!(commit_message)
-    push_branch!(branch)
+    if frozen_green_evidence_handoff?(repo, branch) do
+      Mix.shell().info("PR already green for current HEAD; leaving evidence-only changes uncommitted for handoff")
+    else
+      ensure_git_identity!()
+      maybe_commit_changes!(commit_message)
+      push_branch!(branch)
 
-    case open_pull_request_url(repo, branch) do
-      nil -> create_pull_request!(repo, base, branch, title, body)
-      url -> Mix.shell().info("PR already exists for #{branch}: #{url}")
+      case open_pull_request_url(repo, branch) do
+        nil -> create_pull_request!(repo, base, branch, title, body)
+        url -> Mix.shell().info("PR already exists for #{branch}: #{url}")
+      end
     end
   end
 
@@ -151,6 +155,56 @@ defmodule Mix.Tasks.Workspace.PublishPr do
     end
   end
 
+  defp frozen_green_evidence_handoff?(repo, branch) do
+    evidence_only_changes?() and green_open_pull_request_for_head?(repo, branch, current_head_sha())
+  end
+
+  defp evidence_only_changes? do
+    changes =
+      "git"
+      |> run!(["status", "--porcelain=v1", "-uall"])
+      |> String.split("\n", trim: true)
+      |> Enum.map(&status_path/1)
+      |> Enum.reject(&is_nil/1)
+
+    changes != [] and Enum.all?(changes, &(&1 == "docs/codex-squad-evidence.md"))
+  end
+
+  defp status_path(line) when is_binary(line) do
+    cond do
+      String.starts_with?(line, "?? ") ->
+        String.trim_leading(line, "?? ")
+
+      byte_size(line) > 3 ->
+        line |> binary_part(3, byte_size(line) - 3) |> normalize_status_path()
+
+      true ->
+        nil
+    end
+  end
+
+  defp normalize_status_path(path) do
+    path
+    |> String.trim()
+    |> String.trim_leading("\"")
+    |> String.trim_trailing("\"")
+  end
+
+  defp current_head_sha do
+    "git"
+    |> run!(["rev-parse", "HEAD"])
+    |> String.trim()
+  end
+
+  defp green_open_pull_request_for_head?(repo, branch, head_sha) when is_binary(head_sha) and head_sha != "" do
+    case open_pull_request_details(repo, branch) do
+      %{head_ref_oid: ^head_sha, checks_green?: true} -> true
+      _ -> false
+    end
+  end
+
+  defp green_open_pull_request_for_head?(_repo, _branch, _head_sha), do: false
+
   defp push_branch!(branch) do
     if github_token_env?() do
       with_github_askpass(fn askpass_path ->
@@ -203,15 +257,17 @@ defmodule Mix.Tasks.Workspace.PublishPr do
   end
 
   defp open_pull_request_url(repo, branch) do
+    case open_pull_request_details(repo, branch) do
+      %{url: url} when is_binary(url) and url != "" -> url
+      _ -> nil
+    end
+  end
+
+  defp open_pull_request_details(repo, branch) do
     cond do
-      gh_available?() ->
-        open_pull_request_url_with_gh(repo, branch)
-
-      github_token_env?() ->
-        open_pull_request_with_api(repo, branch)
-
-      true ->
-        nil
+      gh_available?() -> open_pull_request_details_with_gh(repo, branch)
+      github_token_env?() -> open_pull_request_details_with_api(repo, branch)
+      true -> nil
     end
   end
 
@@ -228,7 +284,7 @@ defmodule Mix.Tasks.Workspace.PublishPr do
     end
   end
 
-  defp open_pull_request_url_with_gh(repo, branch) do
+  defp open_pull_request_details_with_gh(repo, branch) do
     case run("gh", [
            "pr",
            "list",
@@ -239,20 +295,37 @@ defmodule Mix.Tasks.Workspace.PublishPr do
            "--state",
            "open",
            "--json",
-           "url",
-           "--jq",
-           ".[0].url"
+           "url,headRefOid,statusCheckRollup"
          ]) do
       {:ok, output} ->
-        case String.trim(output) do
-          "" -> nil
-          url -> url
-        end
+        output
+        |> decode_json()
+        |> first_pull_request_details()
 
       {:error, _reason} ->
         nil
     end
   end
+
+  defp decode_json(output) when is_binary(output) do
+    case Jason.decode(String.trim(output)) do
+      {:ok, decoded} -> decoded
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp first_pull_request_details([pull | _]), do: pull_request_details_from_graphql(pull)
+  defp first_pull_request_details(_decoded), do: nil
+
+  defp pull_request_details_from_graphql(%{} = pull) do
+    %{
+      url: Map.get(pull, "url"),
+      head_ref_oid: Map.get(pull, "headRefOid"),
+      checks_green?: checks_green?(Map.get(pull, "statusCheckRollup"))
+    }
+  end
+
+  defp pull_request_details_from_graphql(_pull), do: nil
 
   defp create_pull_request_with_gh!(repo, base, branch, title, body) do
     output =
@@ -278,12 +351,12 @@ defmodule Mix.Tasks.Workspace.PublishPr do
 
   defp maybe_add_symphony_label(repo, branch) do
     if gh_available?() do
-      case open_pull_request_url_with_gh(repo, branch) do
-        nil ->
+      case open_pull_request_details_with_gh(repo, branch) do
+        %{url: url} when is_binary(url) and url != "" ->
+          run("gh", ["pr", "edit", url, "--repo", repo, "--add-label", "symphony"])
           :ok
 
-        url ->
-          run("gh", ["pr", "edit", url, "--repo", repo, "--add-label", "symphony"])
+        _ ->
           :ok
       end
     else
@@ -291,7 +364,7 @@ defmodule Mix.Tasks.Workspace.PublishPr do
     end
   end
 
-  defp open_pull_request_with_api(repo, branch) do
+  defp open_pull_request_details_with_api(repo, branch) do
     token = github_token!()
     {owner, _name} = github_repo_parts!(repo)
 
@@ -303,14 +376,48 @@ defmodule Mix.Tasks.Workspace.PublishPr do
         pulls
         |> List.first()
         |> case do
-          %{"html_url" => url} when is_binary(url) -> url
-          _ -> nil
+          %{"html_url" => url, "head" => %{"sha" => head_sha}} when is_binary(url) and is_binary(head_sha) ->
+            %{
+              url: url,
+              head_ref_oid: head_sha,
+              checks_green?: api_checks_green?(repo, head_sha, token)
+            }
+
+          %{"html_url" => url} when is_binary(url) ->
+            %{url: url, head_ref_oid: nil, checks_green?: false}
+
+          _ ->
+            nil
         end
 
       _ ->
         nil
     end
   end
+
+  defp api_checks_green?(repo, head_sha, token) do
+    case github_api_request(:get, repo, "/commits/#{head_sha}/check-runs", token: token) do
+      {:ok, %{"check_runs" => checks}} -> checks_green?(checks)
+      _ -> false
+    end
+  end
+
+  defp checks_green?(checks) when is_list(checks) and checks != [] do
+    Enum.all?(checks, &green_check?/1)
+  end
+
+  defp checks_green?(_checks), do: false
+
+  defp green_check?(%{"status" => "COMPLETED", "conclusion" => conclusion})
+       when conclusion in ["SUCCESS", "NEUTRAL", "SKIPPED"],
+       do: true
+
+  defp green_check?(%{"status" => "completed", "conclusion" => conclusion})
+       when conclusion in ["success", "neutral", "skipped"],
+       do: true
+
+  defp green_check?(%{"state" => state}) when state in ["SUCCESS", "success"], do: true
+  defp green_check?(_check), do: false
 
   defp create_pull_request_with_api!(repo, base, branch, title, body) do
     token = github_token!()
