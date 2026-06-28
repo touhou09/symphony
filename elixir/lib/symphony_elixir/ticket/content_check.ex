@@ -162,7 +162,10 @@ defmodule SymphonyElixir.Ticket.ContentCheck do
   @heading_matcher ~r/^\s{0,3}(\#{1,6})\s+(.+?)\s*#*\s*$/
 
   defp parse_sections(description) when is_binary(description) do
-    lines = String.split(description, "\n", trim: false)
+    lines =
+      description
+      |> expand_collapsed_headings()
+      |> String.split("\n", trim: false)
 
     {current, sections, buffer} =
       Enum.reduce(lines, {nil, %{}, []}, fn line, {current_canonical, sections, buffer} ->
@@ -181,6 +184,15 @@ defmodule SymphonyElixir.Ticket.ContentCheck do
 
   defp parse_sections(_description), do: %{}
 
+  @collapsed_heading_pattern ~r/(^|[^\n])(\#{1,6})\s*(Acceptance Criteria|Desired Outcome|Agent Workflow|Handoff Evidence|Verification Evidence|Agent Flow|Squad Flow|Test Plan|Done When|In Scope|Background|Validation|Objective|Acceptance|Evidence|Testing|Context|Problem|Scope|Tests|Goal|배경|목표|범위|완료 조건|검증|테스트|에이전트 플로우|인계 증거)(?=\s|#|:|-|$|[A-Z0-9가-힣])/u
+
+  defp expand_collapsed_headings(description) do
+    Regex.replace(@collapsed_heading_pattern, description, fn _match, prefix, hashes, title ->
+      boundary = if prefix == "", do: "", else: prefix <> "\n"
+      boundary <> hashes <> " " <> title <> "\n"
+    end)
+  end
+
   defp store_section_body(sections, nil, _buffer), do: sections
 
   defp store_section_body(sections, canonical, buffer) do
@@ -190,6 +202,16 @@ defmodule SymphonyElixir.Ticket.ContentCheck do
   defp heading_match(line) do
     case Regex.run(@heading_matcher, line) do
       [_, _hashes, title] -> canonical_section(clean_heading_title(title))
+      _ -> bare_heading_match(line)
+    end
+  end
+
+  defp bare_heading_match(line) do
+    line
+    |> clean_heading_title()
+    |> known_canonical_section()
+    |> case do
+      canonical when is_binary(canonical) and canonical != "" -> canonical
       _ -> nil
     end
   end
@@ -209,12 +231,20 @@ defmodule SymphonyElixir.Ticket.ContentCheck do
     end)
   end
 
+  defp known_canonical_section(title) do
+    normalized = normalize_heading(title)
+
+    Enum.find_value(@canonical_sections, fn {canonical, aliases} ->
+      if normalized in aliases, do: canonical
+    end)
+  end
+
   defp section_body(sections, section) do
     Map.get(sections, canonical_section(section))
   end
 
   defp checklist_items?(body) when is_binary(body) do
-    Regex.match?(~r/^\s*[-*]\s+\[[ xX]\]\s+\S/m, body)
+    Regex.match?(~r/^\s*(?:[-*]\s+)?\[[ xX]\]\s+\S/m, body)
   end
 
   defp normalize_heading(value) do

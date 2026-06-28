@@ -82,8 +82,12 @@ defmodule SymphonyElixir.ConfigFilterTest do
       File.write!(source_auth, ~s({"fake":"auth"}))
       File.mkdir_p!(Path.join(workspace, ".hex"))
       File.mkdir_p!(Path.join(workspace, ".mix"))
+      File.mkdir_p!(Path.join(workspace, ".cache"))
+      File.mkdir_p!(Path.join(workspace, ".docker"))
       File.write!(Path.join([workspace, ".hex", "cache"]), "runtime cache")
       File.write!(Path.join([workspace, ".mix", "archives"]), "runtime cache")
+      File.write!(Path.join([workspace, ".cache", "lazy_html.tar.gz"]), "runtime cache")
+      File.write!(Path.join([workspace, ".docker", ".token_seed"]), "runtime state")
 
       assert {:ok, _command} =
                ConfigFilter.inject_sandbox_config("codex app-server", workspace,
@@ -95,7 +99,7 @@ defmodule SymphonyElixir.ConfigFilterTest do
 
       exclude = File.read!(Path.join([workspace, ".git", "info", "exclude"]))
 
-      for pattern <- [".codex/", ".hex/", ".mix/"] do
+      for pattern <- [".codex/", ".hex/", ".mix/", ".cache/", ".docker/"] do
         assert String.contains?(exclude, pattern)
       end
 

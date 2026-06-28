@@ -1,19 +1,3 @@
-## 2026-06-26: SYM Jira ticket form constraints [done]
-- **What**: Queried SYM Jira project metadata, JSM request types, request form fields, issue create metadata, and validated one JSM request creation path.
-- **Why**: A reusable ticket skill needs to choose between JSM request forms and raw Jira issue creation; their required fields and description formats differ.
-- **Impact**: Agents can create SYM tickets without guessing request type IDs, required fields, status IDs, or localized JQL behavior.
-- **Test**: JSM request type 9 created `SYM-5` through `/rest/servicedeskapi/request`; it was then transitioned to a done-category state, and no token values were written to tracked files.
-- **Next**: Encode the request type table, status IDs, and API choice rules into a `sym-jira-ticket` Codex skill.
----
-
-## 2026-06-27: Ticket preflight and SYM Jira skill guardrails [done]
-- **What**: Added ticket-body preflight, `mix ticket.check`, SYM workflow enforcement, Jira success-transition preference, a durable modification spec, and the local `sym-jira-ticket` Codex skill.
-- **Why**: Symphony needs to reject underspecified tickets before unattended Codex dispatch while keeping verifier evidence as a separate handoff gate.
-- **Impact**: SYM tickets now need structured Background/Scope/Acceptance Criteria/Validation checklists before dispatch; generic successful completion prefers `해결됨`/`완료` over `취소`.
-- **Test**: Targeted ExUnit 28/28, in-repo WORKFLOW render 1/1, `mix format --check-formatted`, `mix ticket.check` positive OK, malformed ticket negative failed with 3 errors, `mix squad.check` OK, and skill script preflight OK.
-- **Next**: Implement phase-2 true multi-model Codex role orchestration; current role separation is still enforced through evidence, not separate model process execution.
----
-
 ## 2026-06-27: SYM-6 real Codex dispatch smoke [blocked]
 - **What**: Created first real Jira dispatch ticket `SYM-6`, rebuilt Compose orchestrator, fixed UTF-8 workflow parsing, and added Jira-mode tracker dynamic tools for Codex app-server.
 - **Why**: The first real run exposed two runtime-only gaps: regex newline parsing corrupted Korean prompt bytes, and Jira mode still exposed only the legacy Linear dynamic tool.
@@ -48,28 +32,12 @@
 - **Next**: Split SYM-6 into smaller implementation tickets or remove the marker only after the ticket is narrowed enough for a real diff-producing run.
 ---
 
-## 2026-06-27: Restart recovery and SYM-6 ticket split smoke [done]
-- **What**: Verified Compose restart recovery against the persisted SYM-6 runtime blocker and split the broad SYM-6 scope into four bounded Jira tickets: SYM-7, SYM-8, SYM-9, and SYM-10.
-- **Why**: The broad parent ticket was too large for unattended Codex and restart recovery needed proof that persisted tracker state prevents repeat dispatch/token burn.
-- **Impact**: SYM-6 remains blocked by marker, while the split tickets are preflight-valid active candidates for smaller Symphony runs.
-- **Test**: Candidate queue before restart was 1, Compose restart logged `runtime blocker persisted`, active agents/tokens stayed at 0, split ticket bodies passed Python and `mix ticket.check`, fetched Jira descriptions passed Symphony preflight, and candidate queue became 5.
-- **Next**: Run split tickets selectively; SYM-10 should be the first real diff-producing E2E smoke after choosing an isolated tiny change.
----
-
 ## 2026-06-27: E2E dispatch unblocked and Compose started [in-progress]
 - **What**: Removed the persisted SYM-6 no-diff runtime blocker marker and started the Docker Compose orchestrator for a live E2E run.
 - **Why**: The user requested marker removal and a real E2E dispatch opportunity after split-ticket validation.
 - **Impact**: SYM-6 and split tickets SYM-7 through SYM-10 are running concurrently under the configured max concurrency.
 - **Test**: SYM-6 preflight returned OK after marker removal; Compose status shows orchestrator up; dashboard/log tail shows 5 active agents with token accounting active.
 - **Next**: Monitor workspaces/Jira workpads for diff, evidence, verifier PASS, no-diff blockers, or terminal transitions.
----
-
-## 2026-06-27: No-diff execution loop fix ticket [done]
-- **What**: Created SYM-11 to track the fix for bounded Codex tickets dispatching but producing no workspace diff before the no-diff guard blocks them.
-- **Why**: SYM-6 through SYM-10 all proved the same workpad-only/no-diff failure mode, so retries should be blocked until the prompt/runtime contract is fixed.
-- **Impact**: Future E2E runs have a dedicated remediation ticket instead of repeatedly burning tokens on active implementation tickets.
-- **Test**: Stopped Compose first, `mix ticket.check` passed for the new ticket body, Jira create returned SYM-11 with `Relates` link to SYM-6, parent comment succeeded, fetched Jira preflight returned OK, and Compose remained stopped.
-- **Trap**: The Python skill validator hung on this longer body, while the repo checker and fetched Jira preflight both passed; treat that validator hang as a tooling follow-up if it recurs.
 ---
 
 ## 2026-06-27: SYM-11 no-diff guard hardening [done]
@@ -125,4 +93,54 @@
 - **Why**: Live SYM-23 left `.codex/auth.json`, sanitized config, and cache directories visible to `git status`, which could pollute `workspace.publish_pr` because it stages with `git add -A`.
 - **Impact**: Future Symphony workspaces can still use mounted Codex auth while publish hooks ignore runtime-only files and avoid committing auth symlinks or cache noise.
 - **Test**: `mix format --check-formatted`, config filter tests 5/5, publish PR tests 2/2, targeted strict Credo clean, `mix specs.check`, and `git diff --check` passed.
+---
+
+## 2026-06-28: Follow-up queue observability and blocker RCA [done]
+- **What**: Kept the split SYM-24..31 follow-up set, then exposed Compose observability, JSM ticket preflight compatibility, dispatch blocker counts, restart claim expiry, and distinct total-token/no-diff blocker causes.
+- **Why**: Live polling looked idle even though every candidate was blocked; the HTTP dashboard was bound to container loopback, SYM-31's JSM body shape was rejected, and total-token blockers were reported as no-diff.
+- **Impact**: Operators can now see `running/retrying/blocked`, dispatch slots, polling state, and exact blocker cause from `127.0.0.1:4000`; restarts no longer renew dead claims indefinitely.
+- **Test**: `mix format --check-formatted`, `mix test` 350/350 plus 2 skipped, `mix specs.check`, `mix squad.check`, `git diff --check`, Compose rebuild/recreate OK, API `/api/v1/state` and dashboard root returned 200.
+- **Trap**: SYM-31 did dispatch after the parser fix, then correctly blocked on the 1.5M total-token guard; old comments used the no-diff marker, so the API now prefers the workpad `Type:` line to recover the true cause.
+- **Next**: Narrow or retune blocked SYM-21/23/25/27/29/30/31 before clearing their runtime blocker markers; SYM-29 remains a true no-diff ticket while the others are total-token blocked.
+---
+
+## 2026-06-28: Colima disk headroom [done]
+- **What**: Resized the default Colima Docker VM from 20GiB to 100GiB and restarted the Symphony compose orchestrator.
+- **Test**: `colima list` reports `100GiB`; container root filesystem reports 99G size, 21G used, 74G available; `/api/v1/state` returned running 0/retrying 0/blocked 7 after restart.
+---
+
+## 2026-06-28: E2E exception handling probe [done]
+- **What**: Verified live blocker/log behavior and added early runtime blockers for MCP invalid-token and insufficient-scope failures instead of letting simple e2e runs burn tokens until a budget stop.
+- **Test**: exception-path tests 164/164, full `mix test` 352/352 plus 2 skipped, `mix specs.check`, `mix squad.check`, `git diff --check`, Compose rebuild/recreate, and `/api/v1/state` OK.
+---
+
+## 2026-06-28: Long-run ops preflight and queue tickets [done]
+- **What**: Added dispatch-time Codex auth preflight and created SYM-32..35 for GitHub App token broker, Codex auth keeper, stateless queue mode, and MCP credential preflight.
+- **Why**: Symphony's stronger orchestration still needs the AIDevSquad-style long-run pattern of short bounded work, external token brokers, explicit credential checks, and graceful blocking before expensive Codex turns.
+- **Impact**: Compose now blocks stale or missing `/root/.codex/auth.json` before starting Codex and leaves the remaining long-run hardening work as dispatchable Jira tickets.
+- **Test**: `mix format --check-formatted`, `git diff --check`, `mix test` 355/355 plus 2 skipped, `mix specs.check`, `mix squad.check --file docs/codex-squad-evidence.example.md --workflow WORKFLOW.md`, ticket strict checks 4/4, Compose rebuild OK, `/api/v1/state` reported running 0/retrying 0/blocked 11 with SYM-32..35 auth-preflight blocked.
+- **Next**: Superseded by the writable-auth-cache follow-up below; `last_refresh` age alone is not a valid hard blocker for active Codex sessions.
+---
+
+## 2026-06-28: Writable Codex auth cache and optional MCP degrade [done]
+- **What**: Changed Compose to seed host Codex auth into a writable named volume, disabled stale-age and total-token hard blocks for e2e, set one active issue, capped recovered restart claims, and stopped optional MCP noise plus squad-completion continuation loops from blocking unrelated tickets.
+- **Why**: Official Codex automation guidance and AIDevSquad both favor trusted-runner credential reuse/degrade over forced relogin; live E2E proved stale `last_refresh` did not prevent Codex calls, while dirty-workspace retries and post-completion reruns inflated token totals.
+- **Impact**: SYM-32..35 can run sequentially while optional Cloudflare MCP scope failures no longer stop GitHub/Codex/queue tickets; restarts no longer hold an empty active slot for 10 minutes, and completed squad runs no longer immediately rerun the same active ticket.
+- **Test**: `mix format --check-formatted`, `mix test` 356/356 plus 2 skipped, targeted continuation/restart tests 113/113, `mix specs.check`, `mix squad.check --file docs/codex-squad-evidence.example.md --workflow WORKFLOW.md`, `git diff --check`, Compose rebuild/restart, marker cleanup, `/api/v1/state` showed SYM-33 running with SYM-34/SYM-35 queued after SYM-32 was removed from the e2e label.
+---
+
+## 2026-06-28: Final verifier green-check freeze [done]
+- **What**: Added final-verifier and workflow handoff rules that freeze repo state after the latest PR checks are green, then rebuilt and restarted Compose.
+- **Why**: SYM-33 proved recording final-head green evidence inside repo files creates a new head and retriggers checks.
+- **Impact**: Future final verifiers should report volatile head/check evidence outside repo files and avoid self-invalidating CI loops.
+- **Test**: `mix format --check-formatted`, `mix test test/symphony_elixir/core_test.exs` 59/59, targeted `git diff --check`, Compose build/recreate, container grep for freeze text, and `/api/v1/state` showed SYM-33 cleared with PR #28 still green at `d7171e3`.
+- **Trap**: Restart redispatched SYM-33 because Jira lacked `Human Review`; moved it to terminal `해결됨` after confirming available transitions.
+---
+
+## 2026-06-28: Squad completion flow hardening [done]
+- **What**: Added a spec and hardened squad completion so normal exits run publish hooks strictly, SYM workflow handoff uses reachable success terminal states and PR-base sync, green evidence-only publish is frozen, and verifier FAIL reasons surface in blockers.
+- **Why**: SYM-33/SYM-35 showed prompt-only handoff could self-trigger CI loops, miss after-complete handoff guarantees, and hide the actual verifier failure behind mechanical PASS-row errors.
+- **Impact**: Compose squad runs now avoid post-green evidence commits, fail visibly when publish handoff fails, and no longer instruct agents to use unavailable SYM `Human Review` success transitions.
+- **Test**: Targeted ExUnit 64/64, full `mix test` 362/362 plus 2 skipped, `mix format --check-formatted`, `mix specs.check`, `mix squad.check`, `git diff --check`, Compose build/recreate, container grep for hardening text, and `/api/v1/state` stayed running/blocked/queued 0 after one poll.
+- **Trap**: SYM-35 was moved to `Pending` before restart so the cleared in-memory blocker would not redispatch and burn tokens.
 ---

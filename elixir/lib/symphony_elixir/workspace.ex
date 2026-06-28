@@ -200,6 +200,20 @@ defmodule SymphonyElixir.Workspace do
 
   @spec run_after_complete_hook(Path.t() | nil, map() | String.t() | nil, worker_host()) :: :ok
   def run_after_complete_hook(workspace, issue_or_identifier, worker_host) when is_binary(workspace) do
+    run_after_complete_hook_result(workspace, issue_or_identifier, worker_host)
+    |> ignore_hook_failure()
+  end
+
+  def run_after_complete_hook(_workspace, _issue_or_identifier, _worker_host), do: :ok
+
+  @spec run_after_complete_hook_result(Path.t() | nil, map() | String.t() | nil) :: :ok | {:error, term()}
+  def run_after_complete_hook_result(workspace, issue_or_identifier) do
+    run_after_complete_hook_result(workspace, issue_or_identifier, nil)
+  end
+
+  @spec run_after_complete_hook_result(Path.t() | nil, map() | String.t() | nil, worker_host()) ::
+          :ok | {:error, term()}
+  def run_after_complete_hook_result(workspace, issue_or_identifier, worker_host) when is_binary(workspace) do
     issue_context = issue_context(issue_or_identifier)
     hooks = Config.settings!().hooks
 
@@ -209,11 +223,10 @@ defmodule SymphonyElixir.Workspace do
 
       command ->
         run_hook(command, workspace, issue_context, "after_complete", worker_host)
-        |> ignore_hook_failure()
     end
   end
 
-  def run_after_complete_hook(_workspace, _issue_or_identifier, _worker_host), do: :ok
+  def run_after_complete_hook_result(_workspace, _issue_or_identifier, _worker_host), do: :ok
 
   defp workspace_path_for_issue(safe_id, nil) when is_binary(safe_id) do
     Config.settings!().workspace.root

@@ -248,6 +248,138 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server allows optional MCP invalid-token stream output to degrade" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-mcp-auth-blocker-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-MCP-AUTH")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-mcp-auth"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-mcp-auth"}}}'
+            ;;
+          4)
+            printf '%s\\n' 'worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { error="invalid_token", error_description="Missing or invalid access token", resource_metadata="https://mcp.cloudflare.com/.well-known/oauth-protected-resource/mcp" })'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-mcp-auth-blocker",
+        identifier: "MT-MCP-AUTH",
+        title: "Degrade optional MCP auth failure",
+        description: "Ensure optional MCP invalid token output does not block unrelated Codex turns",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-MCP-AUTH",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "mcp auth check", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server allows optional MCP insufficient-scope startup status to degrade" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-mcp-scope-blocker-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-MCP-SCOPE")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"method":"mcpServer/startupStatus/updated","params":{"name":"cloudflare-api","status":"failed","error":"UnexpectedServerResponse(HTTP 403: insufficient_scope: Insufficient permissions for mcp)"}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-mcp-scope"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-mcp-scope"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-mcp-scope-blocker",
+        identifier: "MT-MCP-SCOPE",
+        title: "Degrade optional MCP scope failure",
+        description: "Ensure optional MCP insufficient scope does not block unrelated Codex turns",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-MCP-SCOPE",
+        labels: []
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "mcp scope check", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server marks request-for-input events as a hard failure" do
     test_root =
       Path.join(

@@ -18,18 +18,26 @@ services:
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     volumes:
       - ./elixir/WORKFLOW.md:/app/elixir/WORKFLOW.md:ro
-      - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro
+      - ${HOME}/.codex/auth.json:/run/symphony/codex-host/auth.json:ro
       - ${HOME}/.codex/config.toml:/run/symphony/codex-host/config.toml:ro
       - ${SYMPHONY_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - symphony-codex-home:/root/.codex
       - symphony-workspaces:/var/lib/symphony/workspaces
       - symphony-logs:/var/log/symphony
+    ports:
+      - "127.0.0.1:${SYMPHONY_OBSERVABILITY_PORT:-4000}:4000"
     command:
       - ./bin/symphony
       - --i-understand-that-this-will-be-running-without-the-usual-guardrails
       - --logs-root
       - /var/log/symphony
+      - --host
+      - 0.0.0.0
+      - --port
+      - "4000"
       - /app/elixir/WORKFLOW.md
 
 volumes:
+  symphony-codex-home:
   symphony-workspaces:
   symphony-logs:

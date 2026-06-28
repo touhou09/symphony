@@ -34,6 +34,214 @@ defmodule SymphonyElixir.Ticket.ConfigPreflightTest do
     assert_receive {:memory_tracker_comments_requested, ^issue_id}
   end
 
+  test "runtime blocker marker preserves total-token cause when total guard is enabled" do
+    issue_id = "issue-total-token-blocked"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      codex_max_total_tokens: 1
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_comments, [
+      %{
+        issue_id: issue_id,
+        id: "comment-1",
+        body: "## Codex Workpad\n\n<!-- symphony-runtime-blocker:total-token-limit -->\n### Runtime Blocker\n\n- Type: total token limit"
+      }
+    ])
+
+    issue = %Issue{id: issue_id, identifier: "SYM-TOTAL", title: "Runtime total blocked", state: "Todo", description: nil}
+
+    assert {:error, {:runtime_blocker, message}} = Orchestrator.preflight_issue_for_dispatch_for_test(issue)
+    assert message =~ "total token limit"
+    refute message =~ "no-diff"
+    assert_receive {:memory_tracker_comments_requested, ^issue_id}
+  end
+
+  test "runtime blocker type line corrects legacy no-diff marker on total-token blockers" do
+    issue_id = "issue-legacy-total-token-blocked"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      codex_max_total_tokens: 1
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_comments, [
+      %{
+        issue_id: issue_id,
+        id: "comment-1",
+        body: "## Codex Workpad\n\n<!-- symphony-runtime-blocker:no-diff-token-limit -->\n### Runtime Blocker\n\n- Type: total token limit"
+      }
+    ])
+
+    issue = %Issue{id: issue_id, identifier: "SYM-LEGACY-TOTAL", title: "Legacy total blocked", state: "Todo", description: nil}
+
+    assert {:error, {:runtime_blocker, message}} = Orchestrator.preflight_issue_for_dispatch_for_test(issue)
+    assert message =~ "total token limit"
+    refute message =~ "no-diff"
+    assert_receive {:memory_tracker_comments_requested, ^issue_id}
+  end
+
+  test "codex auth preflight blocks dispatch when the configured auth file is missing" do
+    missing_auth_path =
+      Path.join(System.tmp_dir!(), "symphony-missing-codex-auth-#{System.unique_integer([:positive])}.json")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_auth_preflight_enabled: true,
+      codex_auth_json_path: missing_auth_path
+    )
+
+    issue = %Issue{id: "issue-auth-missing", identifier: "SYM-AUTH-MISSING", title: "Needs auth", state: "Todo"}
+
+    assert {:error, {:runtime_blocker, message}} = Orchestrator.preflight_issue_for_dispatch_for_test(issue)
+    assert message =~ "codex authentication preflight failed"
+    assert message =~ "auth file missing"
+    assert message =~ missing_auth_path
+  end
+
+  test "codex auth preflight blocks unreadable auth JSON" do
+    auth_path = Path.join(System.tmp_dir!(), "symphony-invalid-codex-auth-#{System.unique_integer([:positive])}.json")
+    File.write!(auth_path, "{")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_auth_preflight_enabled: true,
+      codex_auth_json_path: auth_path
+    )
+
+    issue = %Issue{id: "issue-auth-invalid-json", identifier: "SYM-AUTH-INVALID-JSON", title: "Needs auth", state: "Todo"}
+
+    assert {:error, {:runtime_blocker, message}} = Orchestrator.preflight_issue_for_dispatch_for_test(issue)
+    assert message =~ "auth file is not valid JSON"
+  end
+
+  test "codex auth preflight blocks unrecognized auth payloads" do
+    auth_path = Path.join(System.tmp_dir!(), "symphony-unrecognized-codex-auth-#{System.unique_integer([:positive])}.json")
+    File.write!(auth_path, Jason.encode!(%{"auth_mode" => "unknown"}))
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_auth_preflight_enabled: true,
+      codex_auth_json_path: auth_path
+    )
+
+    issue = %Issue{id: "issue-auth-unrecognized", identifier: "SYM-AUTH-UNRECOGNIZED", title: "Needs auth", state: "Todo"}
+
+    assert {:error, {:runtime_blocker, message}} = Orchestrator.preflight_issue_for_dispatch_for_test(issue)
+    assert message =~ "does not contain recognizable Codex credentials"
+  end
+
+  test "codex auth preflight accepts API key credentials without refresh timestamps" do
+    auth_path = Path.join(System.tmp_dir!(), "symphony-api-key-codex-auth-#{System.unique_integer([:positive])}.json")
+    File.write!(auth_path, Jason.encode!(%{"OPENAI_API_KEY" => "test-api-key"}))
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_auth_preflight_enabled: true,
+      codex_auth_json_path: auth_path,
+      codex_auth_max_age_ms: 1
+    )
+
+    issue = %Issue{id: "issue-auth-api-key", identifier: "SYM-AUTH-API-KEY", title: "Has auth", state: "Todo"}
+
+    assert :ok = Orchestrator.preflight_issue_for_dispatch_for_test(issue)
+  end
+
+  test "codex auth preflight blocks stale ChatGPT auth refreshes" do
+    auth_path = write_codex_auth_json!(last_refresh: DateTime.utc_now() |> DateTime.add(-2, :hour))
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_auth_preflight_enabled: true,
+      codex_auth_json_path: auth_path,
+      codex_auth_max_age_ms: 3_600_000
+    )
+
+    issue = %Issue{id: "issue-auth-stale", identifier: "SYM-AUTH-STALE", title: "Needs fresh auth", state: "Todo"}
+
+    assert {:error, {:runtime_blocker, message}} = Orchestrator.preflight_issue_for_dispatch_for_test(issue)
+    assert message =~ "auth refresh is stale"
+    assert message =~ "max_age_ms=3600000"
+  end
+
+  test "codex auth preflight blocks missing ChatGPT auth refresh timestamps" do
+    auth_path = write_codex_auth_json!(last_refresh: nil)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_auth_preflight_enabled: true,
+      codex_auth_json_path: auth_path,
+      codex_auth_max_age_ms: 3_600_000
+    )
+
+    issue = %Issue{id: "issue-auth-refresh-missing", identifier: "SYM-AUTH-REFRESH-MISSING", title: "Needs refresh", state: "Todo"}
+
+    assert {:error, {:runtime_blocker, message}} = Orchestrator.preflight_issue_for_dispatch_for_test(issue)
+    assert message =~ "auth last_refresh is missing"
+  end
+
+  test "codex auth preflight blocks invalid ChatGPT auth refresh timestamps" do
+    auth_path = write_codex_auth_json!(last_refresh: "not-a-timestamp")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_auth_preflight_enabled: true,
+      codex_auth_json_path: auth_path,
+      codex_auth_max_age_ms: 3_600_000
+    )
+
+    issue = %Issue{id: "issue-auth-refresh-invalid", identifier: "SYM-AUTH-REFRESH-INVALID", title: "Needs refresh", state: "Todo"}
+
+    assert {:error, {:runtime_blocker, message}} = Orchestrator.preflight_issue_for_dispatch_for_test(issue)
+    assert message =~ "auth last_refresh is not a valid timestamp"
+  end
+
+  test "codex auth preflight allows stale ChatGPT auth when max age is disabled" do
+    auth_path = write_codex_auth_json!(last_refresh: DateTime.utc_now() |> DateTime.add(-2, :hour))
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_auth_preflight_enabled: true,
+      codex_auth_json_path: auth_path,
+      codex_auth_max_age_ms: 0
+    )
+
+    issue = %Issue{id: "issue-auth-stale-allowed", identifier: "SYM-AUTH-STALE-ALLOWED", title: "Allow refresh", state: "Todo"}
+
+    assert :ok = Orchestrator.preflight_issue_for_dispatch_for_test(issue)
+  end
+
+  test "codex authentication runtime marker is retryable after auth preflight is healthy" do
+    issue_id = "issue-auth-marker-retryable"
+    auth_path = write_codex_auth_json!(last_refresh: DateTime.utc_now())
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      codex_max_total_tokens: 1,
+      codex_auth_preflight_enabled: true,
+      codex_auth_json_path: auth_path,
+      codex_auth_max_age_ms: 3_600_000
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_comments, [
+      %{
+        issue_id: issue_id,
+        id: "comment-1",
+        body: "## Codex Workpad\n\n<!-- symphony-runtime-blocker:codex-authentication -->\n### Runtime Blocker\n\n- Type: codex authentication"
+      }
+    ])
+
+    issue = %Issue{id: issue_id, identifier: "SYM-AUTH-RETRY", title: "Auth marker", state: "Todo", description: nil}
+
+    assert :ok = Orchestrator.preflight_issue_for_dispatch_for_test(issue)
+    assert_receive {:memory_tracker_comments_requested, ^issue_id}
+  end
+
   test "configured ticket preflight rejects underspecified active issues" do
     write_workflow_file!(Workflow.workflow_file_path(),
       ticket_block_dispatch_on_invalid_ticket: true,
@@ -89,4 +297,33 @@ defmodule SymphonyElixir.Ticket.ConfigPreflightTest do
 
     assert :ok = Orchestrator.preflight_issue_for_dispatch_for_test(issue)
   end
+
+  defp write_codex_auth_json!(opts) do
+    auth_path =
+      Path.join(System.tmp_dir!(), "symphony-codex-auth-#{System.unique_integer([:positive])}.json")
+
+    auth =
+      %{
+        "auth_mode" => "chatgpt",
+        "tokens" => %{
+          "access_token" => "test-access-token",
+          "refresh_token" => "test-refresh-token"
+        }
+      }
+      |> maybe_put_last_refresh(Keyword.get(opts, :last_refresh))
+
+    File.write!(auth_path, Jason.encode!(auth))
+
+    auth_path
+  end
+
+  defp maybe_put_last_refresh(auth, %DateTime{} = last_refresh) do
+    Map.put(auth, "last_refresh", DateTime.to_iso8601(last_refresh))
+  end
+
+  defp maybe_put_last_refresh(auth, last_refresh) when is_binary(last_refresh) do
+    Map.put(auth, "last_refresh", last_refresh)
+  end
+
+  defp maybe_put_last_refresh(auth, _last_refresh), do: auth
 end

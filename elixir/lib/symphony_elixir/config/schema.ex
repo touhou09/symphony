@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   import Ecto.Changeset
 
+  alias SymphonyElixir.Codex.AuthPreflight
   alias SymphonyElixir.PathSafety
 
   @primary_key false
@@ -274,6 +275,9 @@ defmodule SymphonyElixir.Config.Schema do
       field(:stall_timeout_ms, :integer, default: 300_000)
       field(:max_total_tokens, :integer, default: 0)
       field(:max_no_diff_tokens, :integer, default: 0)
+      field(:auth_preflight_enabled, :boolean, default: false)
+      field(:auth_json_path, :string)
+      field(:auth_max_age_ms, :integer, default: 0)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -290,7 +294,10 @@ defmodule SymphonyElixir.Config.Schema do
           :read_timeout_ms,
           :stall_timeout_ms,
           :max_total_tokens,
-          :max_no_diff_tokens
+          :max_no_diff_tokens,
+          :auth_preflight_enabled,
+          :auth_json_path,
+          :auth_max_age_ms
         ],
         empty_values: []
       )
@@ -300,6 +307,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
       |> validate_number(:max_total_tokens, greater_than_or_equal_to: 0)
       |> validate_number(:max_no_diff_tokens, greater_than_or_equal_to: 0)
+      |> validate_number(:auth_max_age_ms, greater_than_or_equal_to: 0)
     end
   end
 
@@ -546,7 +554,12 @@ defmodule SymphonyElixir.Config.Schema do
     codex = %{
       settings.codex
       | approval_policy: normalize_keys(settings.codex.approval_policy),
-        turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
+        turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy),
+        auth_json_path:
+          resolve_path_value(
+            settings.codex.auth_json_path,
+            AuthPreflight.default_auth_path()
+          )
     }
 
     %{settings | tracker: tracker, workspace: workspace, codex: codex}
@@ -618,6 +631,8 @@ defmodule SymphonyElixir.Config.Schema do
         path
     end
   end
+
+  defp resolve_path_value(_value, default), do: default
 
   defp resolve_env_value(value, fallback) when is_binary(value) do
     case env_reference_name(value) do
