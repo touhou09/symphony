@@ -1131,6 +1131,129 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert blocker_body =~ workspace_path
   end
 
+  test "orchestrator blocks workers that exceed the total token limit even with a diff" do
+    issue_id = "issue-total-token-limit"
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_comments, [
+      %{issue_id: issue_id, id: "comment-1", body: "## Codex Workpad\n\n### Notes"}
+    ])
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{
+        id: issue_id,
+        identifier: "MT-TOTAL",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-TOTAL"
+      }
+    ])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      codex_max_total_tokens: 50
+    )
+
+    workspace_path =
+      Path.join(System.tmp_dir!(), "symphony-total-token-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workspace_path)
+    on_exit(fn -> File.rm_rf(workspace_path) end)
+    assert {_output, 0} = System.cmd("git", ["init", "-q", workspace_path], stderr_to_stdout: true)
+    File.write!(Path.join(workspace_path, "changed.txt"), "diff exists\n")
+
+    orchestrator_name = Module.concat(__MODULE__, :TotalTokenLimitOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    started_at = DateTime.utc_now()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: "MT-TOTAL",
+      issue: %Issue{
+        id: issue_id,
+        identifier: "MT-TOTAL",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-TOTAL"
+      },
+      worker_host: nil,
+      workspace_path: workspace_path,
+      session_id: "thread-total-turn-total",
+      turn_count: 1,
+      last_codex_message: nil,
+      last_codex_timestamp: started_at,
+      last_codex_event: :notification,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{
+           "method" => "thread/tokenUsage/updated",
+           "params" => %{
+             "tokenUsage" => %{
+               "total" => %{"inputTokens" => 40, "outputTokens" => 20, "totalTokens" => 60}
+             }
+           }
+         },
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    Process.sleep(100)
+    state = :sys.get_state(pid)
+
+    refute Process.alive?(worker_pid)
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+    assert state.codex_totals.total_tokens == 60
+
+    assert %{
+             identifier: "MT-TOTAL",
+             workspace_path: ^workspace_path,
+             error: "codex exceeded total token limit: 60 >= 50"
+           } = state.blocked[issue_id]
+
+    assert_receive {:memory_tracker_comments_requested, ^issue_id}
+    assert_receive {:memory_tracker_comment_update, ^issue_id, "comment-1", blocker_body}
+    assert blocker_body =~ "Type: total token limit"
+    assert blocker_body =~ "codex exceeded total token limit"
+    assert blocker_body =~ workspace_path
+  end
+
   test "poll cycle blocks no-diff workers without a new codex event" do
     issue_id = "issue-no-diff-poll"
 
