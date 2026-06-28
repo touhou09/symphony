@@ -215,12 +215,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
       refreshed_state =
         wait_for_orchestrator_state(pid, fn state ->
-          state.codex_auth_status == :ok and state.blocked == %{} and state.claimed == MapSet.new()
+          state.codex_auth_status == :ok and state.blocked == %{} and Map.has_key?(state.running, issue.id)
         end)
 
       assert refreshed_state.codex_auth_status == :ok
       assert refreshed_state.blocked == %{}
-      assert refreshed_state.claimed == MapSet.new()
+      assert MapSet.member?(refreshed_state.claimed, issue.id)
     after
       File.rm_rf(test_root)
 
@@ -1335,6 +1335,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert_receive {:memory_tracker_comments_requested, ^issue_id}
     assert_receive {:memory_tracker_comment_update, ^issue_id, "comment-1", blocker_body}
+    assert blocker_body =~ "<!-- symphony-runtime-blocker:total-token-limit -->"
+    refute blocker_body =~ "<!-- symphony-runtime-blocker:no-diff-token-limit -->"
     assert blocker_body =~ "Type: total token limit"
     assert blocker_body =~ "codex exceeded total token limit"
     assert blocker_body =~ workspace_path
@@ -1538,7 +1540,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_nil(state.retry_attempts[issue_id])
     assert_receive {:memory_tracker_comments_requested, ^issue_id}
     assert_receive {:memory_tracker_comment_update, ^issue_id, "comment-1", blocker_body}
-    assert blocker_body =~ "<!-- symphony-runtime-blocker:no-diff-token-limit -->"
+    assert blocker_body =~ "<!-- symphony-runtime-blocker:runtime -->"
   end
 
   test "poll cycle blocks no-diff workers when workspace status is unavailable" do

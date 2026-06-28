@@ -47,6 +47,50 @@ defmodule SymphonyElixir.Ticket.ContentCheckTest do
              )
   end
 
+  test "accepts portal descriptions where markdown headings are collapsed onto one line" do
+    ticket =
+      "## BackgroundRunner disk was exhausted." <>
+        "## Scope- Include local Docker runner headroom." <>
+        "## Acceptance Criteria- [ ] Docker has enough free space." <>
+        "## Validation- [ ] Run df and docker system df."
+
+    assert :ok =
+             ContentCheck.validate(ticket,
+               required_sections: ContentCheck.default_required_sections(),
+               require_acceptance_checkboxes: true,
+               require_validation_checkboxes: true
+             )
+  end
+
+  test "accepts Jira portal descriptions with bare section headings and checkboxes" do
+    ticket = """
+    Background
+
+    Runner disk was exhausted.
+
+    Scope
+
+    Include:
+
+    Increase the Docker VM allocation.
+
+    Acceptance Criteria
+
+    [ ] Docker has enough free space.
+
+    Validation
+
+    [ ] Run df and docker system df.
+    """
+
+    assert :ok =
+             ContentCheck.validate(ticket,
+               required_sections: ContentCheck.default_required_sections(),
+               require_acceptance_checkboxes: true,
+               require_validation_checkboxes: true
+             )
+  end
+
   test "reports missing description and sections" do
     assert {:error, errors} =
              ContentCheck.validate(nil,

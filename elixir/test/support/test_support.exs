@@ -41,6 +41,7 @@ defmodule SymphonyElixir.TestSupport do
 
         on_exit(fn ->
           Application.delete_env(:symphony_elixir, :workflow_file_path)
+          Application.delete_env(:symphony_elixir, :server_host_override)
           Application.delete_env(:symphony_elixir, :server_port_override)
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
@@ -150,6 +151,9 @@ defmodule SymphonyElixir.TestSupport do
           codex_stall_timeout_ms: 300_000,
           codex_max_total_tokens: 0,
           codex_max_no_diff_tokens: 0,
+          codex_auth_preflight_enabled: false,
+          codex_auth_json_path: nil,
+          codex_auth_max_age_ms: 0,
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -202,6 +206,9 @@ defmodule SymphonyElixir.TestSupport do
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
     codex_max_total_tokens = Keyword.get(config, :codex_max_total_tokens)
     codex_max_no_diff_tokens = Keyword.get(config, :codex_max_no_diff_tokens)
+    codex_auth_preflight_enabled = Keyword.get(config, :codex_auth_preflight_enabled)
+    codex_auth_json_path = Keyword.get(config, :codex_auth_json_path)
+    codex_auth_max_age_ms = Keyword.get(config, :codex_auth_max_age_ms)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -260,6 +267,9 @@ defmodule SymphonyElixir.TestSupport do
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
         "  max_total_tokens: #{yaml_value(codex_max_total_tokens)}",
         "  max_no_diff_tokens: #{yaml_value(codex_max_no_diff_tokens)}",
+        "  auth_preflight_enabled: #{yaml_value(codex_auth_preflight_enabled)}",
+        "  auth_json_path: #{yaml_value(codex_auth_json_path)}",
+        "  auth_max_age_ms: #{yaml_value(codex_auth_max_age_ms)}",
         hooks_yaml(
           hook_after_create,
           hook_before_run,

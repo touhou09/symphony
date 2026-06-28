@@ -442,6 +442,19 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "last_event_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("last_event_at")
                }
              ],
+             "dispatch" => %{
+               "max_active_issues" => 3,
+               "active_issue_slots" => 1,
+               "active_slots_remaining" => 2,
+               "blocked_count" => 1,
+               "queued_count" => 2,
+               "queued" => ["issue-queued-1", "issue-queued-2"]
+             },
+             "polling" => %{
+               "checking" => false,
+               "next_poll_in_ms" => 1_500,
+               "poll_interval_ms" => 30_000
+             },
              "codex_totals" => %{
                "input_tokens" => 4,
                "output_tokens" => 8,
@@ -841,6 +854,15 @@ defmodule SymphonyElixir.ExtensionsTest do
       codex_auth_checked_at: DateTime.utc_now(),
       codex_auth_modified_at_ms: DateTime.to_unix(DateTime.utc_now(), :millisecond),
       codex_auth_unauthorized_seen_ms: nil,
+      dispatch: %{
+        max_active_issues: 3,
+        active_issue_slots: 1,
+        active_slots_remaining: 2,
+        blocked_count: 1,
+        queued_count: 2,
+        queued: ["issue-queued-1", "issue-queued-2"]
+      },
+      polling: %{checking?: false, next_poll_in_ms: 1_500, poll_interval_ms: 30_000},
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
       rate_limits: %{"primary" => %{"remaining" => 11}}
     }

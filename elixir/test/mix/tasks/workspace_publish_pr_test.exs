@@ -44,11 +44,86 @@ defmodule Mix.Tasks.Workspace.PublishPrTest do
     end)
   end
 
+  test "refuses to publish from the base branch before pushing" do
+    with_fake_binaries(fn log_path ->
+      with_env(%{"FAKE_GIT_BRANCH" => "dev", "GH_TOKEN" => "", "GITHUB_TOKEN" => ""}, fn ->
+        assert_raise Mix.Error, ~r/Refusing to publish PR from base branch dev/, fn ->
+          capture_io(fn ->
+            PublishPr.run(["--repo", "touhou09/symphony", "--base", "dev"])
+          end)
+        end
+
+        log = File.read!(log_path)
+        refute log =~ "git add -A"
+        refute log =~ "git commit"
+        refute log =~ "git push"
+        refute log =~ "gh pr create"
+      end)
+    end)
+  end
+
+  test "skips evidence-only publish when existing PR head is already green" do
+    with_fake_binaries(fn log_path ->
+      with_env(
+        %{
+          "FAKE_GIT_STATUS" => "evidence-only",
+          "FAKE_GH_PR_LIST" => "green-existing",
+          "GH_TOKEN" => "",
+          "GITHUB_TOKEN" => ""
+        },
+        fn ->
+          output =
+            capture_io(fn ->
+              PublishPr.run(["--repo", "touhou09/symphony", "--base", "dev"])
+            end)
+
+          assert output =~ "PR already green for current HEAD"
+
+          log = File.read!(log_path)
+          refute log =~ "git add -A"
+          refute log =~ "git commit"
+          refute log =~ "git push"
+          refute log =~ "gh pr create"
+        end
+      )
+    end)
+  end
+
+  test "still publishes substantive changes even when existing PR head is green" do
+    with_fake_binaries(fn log_path ->
+      with_env(
+        %{
+          "FAKE_GIT_STATUS" => "substantive",
+          "FAKE_GH_PR_LIST" => "green-existing",
+          "GH_TOKEN" => "",
+          "GITHUB_TOKEN" => ""
+        },
+        fn ->
+          capture_io(fn ->
+            PublishPr.run(["--repo", "touhou09/symphony", "--base", "dev"])
+          end)
+
+          log = File.read!(log_path)
+          exclude = File.read!(System.fetch_env!("FAKE_GIT_EXCLUDE"))
+
+          for pattern <- [".codex/", ".hex/", ".mix/", ".cache/", ".docker/"] do
+            assert String.contains?(exclude, pattern)
+          end
+
+          assert log =~ "git add -A"
+          assert log =~ "git commit -m Complete sym-13-no-diff-guard"
+          assert log =~ "git push -u origin sym-13-no-diff-guard"
+        end
+      )
+    end)
+  end
+
   defp with_fake_binaries(fun) do
     unique = System.unique_integer([:positive, :monotonic])
     root = Path.join(System.tmp_dir!(), "workspace-publish-pr-task-test-#{unique}")
     bin_dir = Path.join(root, "bin")
     log_path = Path.join(root, "commands.log")
+    exclude_path = Path.join([root, "git-info", "exclude"])
 
     try do
       File.rm_rf!(root)
@@ -63,6 +138,7 @@ defmodule Mix.Tasks.Workspace.PublishPrTest do
       with_env(
         %{
           "COMMAND_LOG" => log_path,
+          "FAKE_GIT_EXCLUDE" => exclude_path,
           "PATH" => Enum.join([bin_dir, original_path], ":")
         },
         fn -> fun.(log_path) end
@@ -82,7 +158,16 @@ defmodule Mix.Tasks.Workspace.PublishPrTest do
     #!/bin/sh
     printf 'git %s\\n' "$*" >> "$COMMAND_LOG"
 
+    if [ "$1" = "-C" ] && [ "$3" = "rev-parse" ] && [ "$4" = "--git-path" ]; then
+      printf '%s\\n' "$FAKE_GIT_EXCLUDE"
+      exit 0
+    fi
+
     if [ "$1" = "branch" ] && [ "$2" = "--show-current" ]; then
+      if [ -n "$FAKE_GIT_BRANCH" ]; then
+        printf '%s\\n' "$FAKE_GIT_BRANCH"
+        exit 0
+      fi
       printf 'sym-13-no-diff-guard\\n'
       exit 0
     fi
@@ -92,7 +177,28 @@ defmodule Mix.Tasks.Workspace.PublishPrTest do
       exit 0
     fi
 
+    if [ "$1" = "rev-parse" ] && [ "$2" = "HEAD" ]; then
+      printf 'abc123green\\n'
+      exit 0
+    fi
+
     if [ "$1" = "status" ]; then
+      case "$FAKE_GIT_STATUS" in
+        evidence-only)
+          printf ' M docs/codex-squad-evidence.md\\n'
+          ;;
+        substantive)
+          printf ' M elixir/lib/symphony_elixir/orchestrator.ex\\n'
+          ;;
+      esac
+      exit 0
+    fi
+
+    if [ "$1" = "add" ]; then
+      exit 0
+    fi
+
+    if [ "$1" = "commit" ]; then
       exit 0
     fi
 
@@ -124,6 +230,9 @@ defmodule Mix.Tasks.Workspace.PublishPrTest do
     printf 'gh %s\\n' "$*" >> "$COMMAND_LOG"
 
     if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+      if [ "$FAKE_GH_PR_LIST" = "green-existing" ]; then
+        printf '%s\\n' '[{"url":"https://github.com/touhou09/symphony/pull/28","headRefOid":"abc123green","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}]'
+      fi
       exit 0
     fi
 

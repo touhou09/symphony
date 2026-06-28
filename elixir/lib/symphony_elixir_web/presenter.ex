@@ -25,6 +25,8 @@ defmodule SymphonyElixirWeb.Presenter do
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
+          dispatch: dispatch_payload(Map.get(snapshot, :dispatch)),
+          polling: polling_payload(Map.get(snapshot, :polling)),
           codex_totals: snapshot.codex_totals,
           rate_limits: snapshot.rate_limits
         }
@@ -197,6 +199,29 @@ defmodule SymphonyElixirWeb.Presenter do
       last_event_at: iso8601(blocked.last_codex_timestamp)
     }
   end
+
+  defp dispatch_payload(%{} = dispatch) do
+    %{
+      max_active_issues: Map.get(dispatch, :max_active_issues),
+      active_issue_slots: Map.get(dispatch, :active_issue_slots),
+      active_slots_remaining: Map.get(dispatch, :active_slots_remaining),
+      blocked_count: Map.get(dispatch, :blocked_count),
+      queued_count: Map.get(dispatch, :queued_count),
+      queued: Map.get(dispatch, :queued, [])
+    }
+  end
+
+  defp dispatch_payload(_dispatch), do: %{}
+
+  defp polling_payload(%{} = polling) do
+    %{
+      checking: Map.get(polling, :checking?),
+      next_poll_in_ms: Map.get(polling, :next_poll_in_ms),
+      poll_interval_ms: Map.get(polling, :poll_interval_ms)
+    }
+  end
+
+  defp polling_payload(_polling), do: %{}
 
   defp workspace_path(issue_identifier, running, retry, blocked) do
     (running && Map.get(running, :workspace_path)) ||
