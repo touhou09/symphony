@@ -1247,7 +1247,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_unclaimed?(
          issue_id,
-         %State{claimed: claimed, completed: completed, running: running, running_claims: running_claims, blocked: blocked}
+         %State{
+           claimed: claimed,
+           completed: completed,
+           running: running,
+           running_claims: running_claims,
+           blocked: blocked
+         }
        ) do
     !MapSet.member?(claimed, issue_id) and
       !MapSet.member?(completed, issue_id) and
