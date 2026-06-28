@@ -14,6 +14,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
+  @squad_evidence_retry_limit 3
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @runtime_blocker_marker_pattern ~r/<!--\s*symphony-runtime-blocker:([a-z0-9-]+)\s*-->/i
@@ -258,9 +259,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp handle_agent_down({:runtime_blocker, reason}, state, issue_id, running_entry, session_id) do
     error = if is_binary(reason), do: reason, else: "runtime blocker: #{inspect(reason)}"
 
-    Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}; #{error}")
+    if retryable_squad_evidence_contract_error?(error) do
+      retry_squad_evidence_contract_agent_down(state, issue_id, running_entry, session_id, error)
+    else
+      Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}; #{error}")
 
-    block_no_diff_agent_down(state, issue_id, running_entry, session_id, error)
+      block_no_diff_agent_down(state, issue_id, running_entry, session_id, error)
+    end
   end
 
   defp handle_agent_down(reason, state, issue_id, running_entry, session_id) do
@@ -297,6 +302,49 @@ defmodule SymphonyElixir.Orchestrator do
       worker_host: Map.get(running_entry, :worker_host),
       workspace_path: Map.get(running_entry, :workspace_path)
     })
+  end
+
+  defp retry_squad_evidence_contract_agent_down(state, issue_id, running_entry, session_id, error) do
+    next_attempt = squad_evidence_next_retry_attempt(running_entry)
+
+    cond do
+      next_attempt <= @squad_evidence_retry_limit and retry_candidate_issue?(running_entry.issue, terminal_state_set()) ->
+        Logger.warning(
+          "Squad evidence contract incomplete for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}; scheduling verification continuation attempt=#{next_attempt}; #{error}"
+        )
+
+        schedule_issue_retry(state, issue_id, next_attempt, %{
+          identifier: running_entry.identifier,
+          issue_url: running_entry.issue.url,
+          error: error,
+          worker_host: Map.get(running_entry, :worker_host),
+          workspace_path: Map.get(running_entry, :workspace_path)
+        })
+
+      next_attempt > @squad_evidence_retry_limit ->
+        Logger.warning(
+          "Issue blocked after squad evidence retry exhaustion: issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id} attempts=#{@squad_evidence_retry_limit}; #{error}"
+        )
+
+        block_no_diff_agent_down(state, issue_id, running_entry, session_id, error)
+
+      true ->
+        Logger.warning(
+          "Issue blocked because squad evidence failed after issue left retryable states: issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}; #{error}"
+        )
+
+        block_no_diff_agent_down(state, issue_id, running_entry, session_id, error)
+    end
+  end
+
+  defp retryable_squad_evidence_contract_error?(error),
+    do: is_binary(error) and String.contains?(error, "squad evidence contract failed")
+
+  defp squad_evidence_next_retry_attempt(running_entry) when is_map(running_entry) do
+    case Map.get(running_entry, :retry_attempt) do
+      attempt when is_integer(attempt) and attempt > 0 -> attempt + 1
+      _ -> 1
+    end
   end
 
   defp maybe_schedule_completion_continuation(%State{} = state, issue_id, running_entry, session_id) do
