@@ -51,6 +51,18 @@ Minimum mechanical gate for unattended dispatch:
 - `Validation`, `Test Plan`, or `Testing` must contain checklist items.
 - Missing or empty required sections block dispatch and write a blocker comment.
 
+### 4.1 Long-body validator behavior (future agent notes)
+
+When changing ticket shape validation (`SymphonyElixir.Ticket.ContentCheck`) use only generated synthetic fixtures and keep strictness unchanged.
+
+- Use long synthetic bodies of at least 50 KB and preferably around 100 KB when reproducing slow-path behavior.
+- Keep required section names stable (`Background`, `Scope`, `Acceptance Criteria`, `Validation`) and do not weaken checklist requirements in any section.
+- For direct in-repo validation (`ContentCheck.validate/2` and `mix ticket.check --strict`), enforce a guardrail budget of ~2 seconds in tests.
+- When wrapping an external validator process, cap the whole validation call at ~5 seconds and fail fast with an actionable error if the boundary is reached.
+- A malformed long fixture should fail with a specific contract message (for example, `section ## Validation must include checklist items`) instead of hanging.
+- The in-repo validator now supports `validation_timeout_ms` to force bounded behavior in tests and tooling; callers should default to a small timeout and return a clear `...timed out...` error rather than hanging.
+- If the Python `sym-jira-ticket` surface is available in the workspace, run both validators on the same generated valid and malformed long fixtures and keep results aligned in evidence. If unavailable, document the missing tooling in the workpad as a hard blocker.
+
 ## 5. Role / Model Flow
 
 | Role | Model | Responsibility | Current enforcement |
