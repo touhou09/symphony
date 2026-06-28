@@ -111,6 +111,7 @@ defmodule SymphonyElixir.TestSupport do
           ticket_require_acceptance_checkboxes: false,
           ticket_require_validation_checkboxes: false,
           max_concurrent_agents: 10,
+          max_active_issues: nil,
           max_turns: 20,
           max_retry_backoff_ms: 300_000,
           squad_enabled: false,
@@ -166,6 +167,7 @@ defmodule SymphonyElixir.TestSupport do
     ticket_require_acceptance_checkboxes = Keyword.get(config, :ticket_require_acceptance_checkboxes)
     ticket_require_validation_checkboxes = Keyword.get(config, :ticket_require_validation_checkboxes)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
+    max_active_issues = Keyword.get(config, :max_active_issues)
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     squad_enabled = Keyword.get(config, :squad_enabled)
@@ -221,6 +223,7 @@ defmodule SymphonyElixir.TestSupport do
         ),
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
+        "  max_active_issues: #{yaml_value(max_active_issues)}",
         "  max_turns: #{yaml_value(max_turns)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
         "  squad_enabled: #{yaml_value(squad_enabled)}",

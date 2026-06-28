@@ -21,6 +21,53 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, :stop)
   end
 
+  test "orchestrator snapshot exposes bounded dispatch queue state" do
+    issue = %Issue{
+      id: "MT-QUEUE-1",
+      identifier: "MT-QUEUE-1",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-QUEUE-1"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :DispatchQueueSnapshotOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      started_at: DateTime.utc_now(),
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil
+    }
+
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue.id => running_entry})
+      |> Map.put(:running_claims, %{"MT-QUEUE-1" => System.system_time(:millisecond) + 10_000})
+      |> Map.put(:queued, ["MT-QUEUED-1", "MT-QUEUED-2"])
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{dispatch: dispatch} = snapshot
+    assert dispatch.max_active_issues == 3
+    assert is_integer(dispatch.active_issue_slots)
+    assert dispatch.active_issue_slots == 1
+    assert dispatch.queued_count == 2
+    assert dispatch.queued == ["MT-QUEUED-1", "MT-QUEUED-2"]
+  end
+
   test "orchestrator snapshot reflects last codex update and session id" do
     issue_id = "issue-snapshot"
 

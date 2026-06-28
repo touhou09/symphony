@@ -187,9 +187,12 @@ defmodule SymphonyElixir.CoreTest do
 
     assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
     assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
-    assert Map.get(hooks, "after_complete") =~ "mix workspace.publish_pr"
+    assert Map.get(hooks, "after_complete") =~ "cd elixir && mix workspace.publish_pr"
     assert Map.get(hooks, "after_complete") =~ "SYMPHONY_PR_REPO"
-    assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
+    assert Map.get(hooks, "after_complete") =~ "--base \"${SYMPHONY_PR_BASE:-dev}\""
+    assert Map.get(hooks, "before_remove") =~ "cd elixir && mix workspace.before_remove"
+    refute Map.get(hooks, "after_complete") =~ "mise exec"
+    refute Map.get(hooks, "before_remove") =~ "mise exec"
 
     agent = Map.get(config, "agent", %{})
     assert get_in(agent, ["model_roles", "cto"]) == "gpt-5.5"

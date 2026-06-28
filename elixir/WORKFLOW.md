@@ -60,12 +60,14 @@ hooks:
     if command -v mise >/dev/null 2>&1; then
       cd elixir && mise trust && mise exec -- mix deps.get
     fi
+    # Compose orchestrator image ships mix and runs completion hooks directly.
   after_complete: |
-    cd elixir && mise exec -- mix workspace.publish_pr --repo "${SYMPHONY_PR_REPO:-touhou09/symphony}" --base "${SYMPHONY_PR_BASE:-dev}"
+    cd elixir && mix workspace.publish_pr --repo "${SYMPHONY_PR_REPO:-touhou09/symphony}" --base "${SYMPHONY_PR_BASE:-dev}"
   before_remove: |
-    cd elixir && mise exec -- mix workspace.before_remove
+    cd elixir && mix workspace.before_remove
 agent:
   max_concurrent_agents: 10
+  max_active_issues: 3
   max_turns: 20
   squad_enabled: true
   model_roles:

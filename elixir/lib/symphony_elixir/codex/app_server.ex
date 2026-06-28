@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH}
+  alias SymphonyElixir.{Codex.ConfigFilter, Codex.DynamicTool, Config, PathSafety, SSH}
 
   @initialize_id 1
   @thread_start_id 2
@@ -42,7 +42,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     codex_command = Keyword.get(opts, :codex_command, Config.settings!().codex.command)
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host, codex_command) do
+         {:ok, sandboxed_codex_command} <- maybe_sandbox_codex_command(worker_host, codex_command, expanded_workspace),
+         {:ok, port} <- start_port(expanded_workspace, worker_host, sandboxed_codex_command) do
       metadata = port_metadata(port, worker_host)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
@@ -189,6 +190,13 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:ok, workspace}
     end
   end
+
+  defp maybe_sandbox_codex_command(nil, codex_command, expanded_workspace)
+       when is_binary(codex_command) and is_binary(expanded_workspace) do
+    ConfigFilter.inject_sandbox_config(codex_command, expanded_workspace)
+  end
+
+  defp maybe_sandbox_codex_command(_worker_host, codex_command, _expanded_workspace), do: {:ok, codex_command}
 
   defp start_port(workspace, nil, codex_command) do
     executable = System.find_executable("bash")

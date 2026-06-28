@@ -22,23 +22,30 @@ defmodule SymphonyElixir.Orchestrator do
     total_tokens: 0,
     seconds_running: 0
   }
+  @dispatch_claim_ttl_ms 600_000
+  @dispatch_claim_file Path.join([".symphony", "orchestrator-running-claims.json"])
 
   defmodule State do
     @moduledoc """
     Runtime state for the orchestrator polling loop.
     """
 
+    @type t :: %__MODULE__{}
+
     defstruct [
       :poll_interval_ms,
       :max_concurrent_agents,
+      :max_active_issues,
       :next_poll_due_at_ms,
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
       running: %{},
+      running_claims: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
       blocked: %{},
+      queued: [],
       retry_attempts: %{},
       codex_totals: nil,
       codex_rate_limits: nil
@@ -59,6 +66,7 @@ defmodule SymphonyElixir.Orchestrator do
     state = %State{
       poll_interval_ms: config.polling.interval_ms,
       max_concurrent_agents: config.agent.max_concurrent_agents,
+      max_active_issues: config.agent.max_active_issues,
       next_poll_due_at_ms: now_ms,
       poll_check_in_progress: false,
       tick_timer_ref: nil,
@@ -66,6 +74,8 @@ defmodule SymphonyElixir.Orchestrator do
       codex_totals: @empty_codex_totals,
       codex_rate_limits: nil
     }
+
+    state = load_running_claims(state)
 
     run_terminal_workspace_cleanup()
     state = schedule_tick(state, 0)
@@ -130,6 +140,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
+        state = release_issue_claim(state, issue_id)
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
 
@@ -290,10 +301,13 @@ defmodule SymphonyElixir.Orchestrator do
       state
       |> reconcile_running_issues()
       |> reconcile_blocked_issues()
+      |> touch_running_claims()
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues(),
-         true <- available_slots(state) > 0 do
+         _maybe <- :ok do
+      state = reconcile_running_claims_with_candidates(state, issues)
+      state = reconcile_queue_with_candidates(state, issues)
       choose_issues(issues, state)
     else
       {:error, :missing_linear_api_token} ->
@@ -332,9 +346,6 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
-        state
-
-      false ->
         state
     end
   end
@@ -614,6 +625,7 @@ defmodule SymphonyElixir.Orchestrator do
         %{
           state
           | running: Map.delete(state.running, issue_id),
+            running_claims: Map.delete(state.running_claims, issue_id),
             claimed: MapSet.delete(state.claimed, issue_id),
             blocked: Map.delete(state.blocked, issue_id),
             retry_attempts: Map.delete(state.retry_attempts, issue_id)
@@ -882,6 +894,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error) do
+    state = release_issue_claim(state, issue_id)
+
     blocked_entry = %{
       issue_id: issue_id,
       identifier: Map.get(running_entry, :identifier, issue_id),
@@ -908,16 +922,155 @@ defmodule SymphonyElixir.Orchestrator do
   defp choose_issues(issues, state) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
+    state = reconcile_queue_with_candidates(state, issues)
 
     issues
     |> sort_issues_for_dispatch()
     |> Enum.reduce(state, fn issue, state_acc ->
       if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
-        dispatch_issue(state_acc, issue)
-      else
         state_acc
+        |> claim_issue_for_dispatch(issue.id)
+        |> dispatch_issue(issue)
+      else
+        maybe_queue_issue(issue, state_acc, active_states, terminal_states)
       end
     end)
+    |> persist_running_claims()
+  end
+
+  @doc false
+  @spec dispatch_plan_for_test([Issue.t()], term()) :: %{dispatch: [String.t()], queued: [String.t()]}
+  def dispatch_plan_for_test(issues, %State{} = state) when is_list(issues) do
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
+
+    state = reconcile_queue_with_candidates(state, issues)
+
+    {dispatch_ids, queued_ids, _state} =
+      issues
+      |> sort_issues_for_dispatch()
+      |> Enum.reduce({[], state.queued, state}, fn issue, {dispatch_acc, queued_acc, state_acc} ->
+        cond do
+          should_dispatch_issue?(issue, state_acc, active_states, terminal_states) ->
+            state_acc = claim_issue_for_dispatch(state_acc, issue.id)
+            {[issue.id | dispatch_acc], release_claimed_from_queue(queued_acc, issue.id), state_acc}
+
+          should_queue_issue?(issue, state_acc, active_states, terminal_states) ->
+            {dispatch_acc, add_queued_issue(queued_acc, issue.id), state_acc}
+
+          true ->
+            {dispatch_acc, queued_acc, state_acc}
+        end
+      end)
+
+    %{dispatch: Enum.reverse(dispatch_ids), queued: queued_ids}
+  end
+
+  @doc false
+  @spec load_running_claims_for_test(State.t()) :: State.t()
+  def load_running_claims_for_test(%State{} = state), do: load_running_claims(state)
+
+  defp maybe_queue_issue(
+         %Issue{} = issue,
+         %State{} = state,
+         active_states,
+         terminal_states
+       ) do
+    if should_queue_issue?(issue, state, active_states, terminal_states) do
+      queue_issue(state, issue.id)
+    else
+      state
+    end
+  end
+
+  defp maybe_queue_issue(_issue, state, _active_states, _terminal_states), do: state
+
+  defp should_queue_issue?(
+         %Issue{} = issue,
+         %State{blocked: blocked, running_claims: running_claims, queued: queued},
+         active_states,
+         terminal_states
+       ) do
+    candidate_issue?(issue, active_states, terminal_states) and
+      !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
+      !Map.has_key?(blocked, issue.id) and
+      !Map.has_key?(running_claims, issue.id) and
+      !queued_issue?(issue.id, queued)
+  end
+
+  defp should_queue_issue?(_issue, _state, _active_states, _terminal_states), do: false
+
+  defp claim_issue_for_dispatch(%State{} = state, issue_id) when is_binary(issue_id) do
+    %{
+      state
+      | running_claims: Map.put(state.running_claims, issue_id, System.system_time(:millisecond) + dispatch_claim_ttl()),
+        queued: release_claimed_from_queue(state.queued, issue_id)
+    }
+  end
+
+  defp claim_issue_for_dispatch(state, _issue_id), do: state
+
+  defp queued_issue?(issue_id, queued) when is_binary(issue_id) and is_list(queued) do
+    Enum.member?(queued, issue_id)
+  end
+
+  defp queued_issue?(_issue_id, _queued), do: false
+
+  defp queue_issue(%State{queued: queued} = state, issue_id)
+       when is_binary(issue_id) and is_list(queued) do
+    %{state | queued: add_queued_issue(queued, issue_id)}
+  end
+
+  defp queue_issue(%State{} = state, _issue_id), do: state
+
+  defp add_queued_issue(queued, issue_id) when is_list(queued) and is_binary(issue_id) do
+    if Enum.member?(queued, issue_id), do: queued, else: queued ++ [issue_id]
+  end
+
+  defp add_queued_issue(queued, _issue_id), do: queued
+
+  defp reconcile_queue_with_candidates(%State{queued: queued} = state, issues)
+       when is_list(queued) and is_list(issues) do
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
+
+    eligible_queue_ids =
+      issues
+      |> Enum.filter(&candidate_issue?(&1, active_states, terminal_states))
+      |> Enum.reject(&todo_issue_blocked_by_non_terminal?(&1, terminal_states))
+      |> Enum.map(& &1.id)
+      |> MapSet.new()
+
+    %{state | queued: Enum.filter(queued, &MapSet.member?(eligible_queue_ids, &1))}
+  end
+
+  defp reconcile_queue_with_candidates(%State{} = state, _issues), do: state
+
+  defp reconcile_running_claims_with_candidates(
+         %State{running_claims: running_claims} = state,
+         issues
+       )
+       when is_map(running_claims) and is_list(issues) do
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
+
+    eligible_claim_ids =
+      issues
+      |> Enum.filter(fn issue ->
+        candidate_issue?(issue, active_states, terminal_states) and
+          !todo_issue_blocked_by_non_terminal?(issue, terminal_states)
+      end)
+      |> Enum.map(& &1.id)
+      |> MapSet.new()
+
+    running_claims =
+      running_claims
+      |> Enum.reject(fn {issue_id, _deadline} ->
+        !MapSet.member?(eligible_claim_ids, issue_id)
+      end)
+      |> Map.new()
+
+    %{state | running_claims: running_claims}
   end
 
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
@@ -942,7 +1095,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp should_dispatch_issue?(
          %Issue{} = issue,
-         %State{running: running, claimed: claimed, blocked: blocked} = state,
+         %State{
+           running: running,
+           claimed: claimed,
+           blocked: blocked,
+           running_claims: running_claims
+         } = state,
          active_states,
          terminal_states
        ) do
@@ -950,6 +1108,7 @@ defmodule SymphonyElixir.Orchestrator do
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
+      !Map.has_key?(running_claims, issue.id) and
       !Map.has_key?(blocked, issue.id) and
       available_slots(state) > 0 and
       state_slots_available?(issue, running) and
@@ -1061,12 +1220,12 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:skip, :missing} ->
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
-        state
+        release_issue_claim(state, issue.id)
 
       {:skip, %Issue{} = refreshed_issue} ->
         Logger.info("Skipping stale dispatch after issue refresh: #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)} blocked_by=#{length(refreshed_issue.blocked_by)}")
 
-        state
+        release_issue_claim(state, refreshed_issue.id)
 
       {:error, reason} ->
         Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
@@ -1080,7 +1239,7 @@ defmodule SymphonyElixir.Orchestrator do
     case select_worker_host(state, preferred_worker_host) do
       :no_worker_capacity ->
         Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
-        state
+        release_issue_claim(state, issue.id)
 
       worker_host ->
         spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
@@ -1129,6 +1288,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
+        state = release_issue_claim(state, issue.id)
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 
         schedule_issue_retry(state, issue.id, next_attempt, %{
@@ -1228,6 +1388,8 @@ defmodule SymphonyElixir.Orchestrator do
       last_codex_event: nil,
       last_codex_timestamp: nil
     }
+
+    state = release_issue_claim(state, issue_id)
 
     Logger.warning("Blocking dispatch for #{issue_context(issue)}: #{error}")
 
@@ -1507,11 +1669,83 @@ defmodule SymphonyElixir.Orchestrator do
   defp release_issue_claim(%State{} = state, issue_id) do
     %{
       state
-      | claimed: MapSet.delete(state.claimed, issue_id),
+      | running_claims: Map.delete(state.running_claims, issue_id),
+        claimed: MapSet.delete(state.claimed, issue_id),
         blocked: Map.delete(state.blocked, issue_id),
-        retry_attempts: Map.delete(state.retry_attempts, issue_id)
+        retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        queued: release_claimed_from_queue(state.queued, issue_id)
     }
   end
+
+  defp release_claimed_from_queue(queued, issue_id) when is_list(queued) and is_binary(issue_id) do
+    Enum.reject(queued, &(&1 == issue_id))
+  end
+
+  defp release_claimed_from_queue(_queued, _issue_id), do: []
+
+  defp load_running_claims(%State{} = state) do
+    with {:ok, body} <- File.read(@dispatch_claim_file),
+         {:ok, claims} <- Jason.decode(body),
+         normalized_claims <- normalize_running_claims(claims) do
+      %{state | running_claims: touch_running_claims(normalized_claims)}
+    else
+      {:error, :enoent} ->
+        state
+
+      {:error, _reason} ->
+        Logger.warning("Failed to load persisted orchestrator running claims from #{@dispatch_claim_file}")
+        state
+    end
+  end
+
+  defp normalize_running_claims(claims) when is_map(claims) do
+    claims
+    |> Enum.reduce(%{}, fn
+      {issue_id, expiry}, acc when is_binary(issue_id) and is_integer(expiry) and expiry > 0 ->
+        Map.put(acc, issue_id, expiry)
+
+      {_issue_id, _expiry}, acc ->
+        acc
+    end)
+  end
+
+  defp normalize_running_claims(_claims), do: %{}
+
+  defp persist_running_claims(%State{} = state) do
+    File.mkdir_p(Path.dirname(@dispatch_claim_file))
+
+    if state.running_claims == %{} do
+      File.rm(@dispatch_claim_file)
+    else
+      File.write!(@dispatch_claim_file, Jason.encode!(state.running_claims))
+    end
+
+    state
+  rescue
+    _error ->
+      Logger.warning("Failed to persist orchestrator running claims at #{@dispatch_claim_file}")
+      state
+  end
+
+  defp touch_running_claims(%State{running_claims: running_claims} = state) when is_map(running_claims) do
+    %{state | running_claims: touch_running_claims(running_claims)}
+  end
+
+  defp touch_running_claims(%State{} = state), do: state
+
+  defp touch_running_claims(running_claims) when is_map(running_claims) do
+    renewed_until_ms = System.system_time(:millisecond) + dispatch_claim_ttl()
+
+    running_claims
+    |> Enum.filter(fn {_issue_id, expiry_ms} ->
+      is_integer(expiry_ms) and expiry_ms > 0
+    end)
+    |> Map.new(fn {issue_id, _expiry_ms} -> {issue_id, renewed_until_ms} end)
+  end
+
+  defp touch_running_claims(_running_claims), do: %{}
+
+  defp dispatch_claim_ttl, do: @dispatch_claim_ttl_ms
 
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
     if metadata[:delay_type] == :continuation and attempt == 1 do
@@ -1650,12 +1884,25 @@ defmodule SymphonyElixir.Orchestrator do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
   end
 
+  defp active_issue_limit(%State{max_active_issues: max_active_issues}) when is_integer(max_active_issues) and max_active_issues > 0,
+    do: max_active_issues
+
+  defp active_issue_limit(%State{}) do
+    Config.settings!().agent.max_active_issues || Config.settings!().agent.max_concurrent_agents
+  end
+
   defp available_slots(%State{} = state) do
-    max(
-      (state.max_concurrent_agents || Config.settings!().agent.max_concurrent_agents) -
-        map_size(state.running),
-      0
-    )
+    max(active_issue_limit(state) - active_issue_slot_count(state), 0)
+  end
+
+  defp active_issue_slot_count(%State{running: running, running_claims: running_claims})
+       when is_map(running) and is_map(running_claims) do
+    MapSet.union(MapSet.new(Map.keys(running)), MapSet.new(Map.keys(running_claims)))
+    |> MapSet.size()
+  end
+
+  defp active_issue_slot_count(%State{} = state) do
+    map_size(state.running) + map_size(state.running_claims)
   end
 
   @spec request_refresh() :: map() | :unavailable
@@ -1706,10 +1953,10 @@ defmodule SymphonyElixir.Orchestrator do
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
           session_id: metadata.session_id,
-          codex_app_server_pid: metadata.codex_app_server_pid,
-          codex_input_tokens: metadata.codex_input_tokens,
-          codex_output_tokens: metadata.codex_output_tokens,
-          codex_total_tokens: metadata.codex_total_tokens,
+          codex_app_server_pid: Map.get(metadata, :codex_app_server_pid),
+          codex_input_tokens: Map.get(metadata, :codex_input_tokens),
+          codex_output_tokens: Map.get(metadata, :codex_output_tokens),
+          codex_total_tokens: Map.get(metadata, :codex_total_tokens),
           turn_count: Map.get(metadata, :turn_count, 0),
           started_at: metadata.started_at,
           last_codex_timestamp: metadata.last_codex_timestamp,
@@ -1758,6 +2005,13 @@ defmodule SymphonyElixir.Orchestrator do
        running: running,
        retrying: retrying,
        blocked: blocked,
+       dispatch: %{
+         max_active_issues: active_issue_limit(state),
+         active_issue_slots: active_issue_slot_count(state),
+         active_slots_remaining: available_slots(state),
+         queued_count: length(state.queued),
+         queued: state.queued
+       },
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
@@ -1919,7 +2173,8 @@ defmodule SymphonyElixir.Orchestrator do
     %{
       state
       | poll_interval_ms: config.polling.interval_ms,
-        max_concurrent_agents: config.agent.max_concurrent_agents
+        max_concurrent_agents: config.agent.max_concurrent_agents,
+        max_active_issues: config.agent.max_active_issues
     }
   end
 

@@ -27,10 +27,10 @@ squad-check:
 	$(MIX) squad.check --file docs/codex-squad-evidence.example.md --workflow WORKFLOW.md
 
 coverage:
-	$(MIX) test --cover
+	MIX_ENV=test $(MIX) test --cover
 
 test:
-	$(MIX) test
+	MIX_ENV=test $(MIX) test
 
 dialyzer:
 	$(MIX) deps.get

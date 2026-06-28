@@ -203,6 +203,7 @@ defmodule SymphonyElixir.Config.Schema do
     @default_required_verifiers ["verifier", "final_verifier"]
     embedded_schema do
       field(:max_concurrent_agents, :integer, default: 10)
+      field(:max_active_issues, :integer, default: 3)
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
       field(:squad_enabled, :boolean, default: false)
@@ -224,6 +225,7 @@ defmodule SymphonyElixir.Config.Schema do
         attrs,
         [
           :max_concurrent_agents,
+          :max_active_issues,
           :max_turns,
           :max_retry_backoff_ms,
           :squad_enabled,
@@ -234,6 +236,7 @@ defmodule SymphonyElixir.Config.Schema do
         empty_values: []
       )
       |> validate_number(:max_concurrent_agents, greater_than: 0)
+      |> validate_number(:max_active_issues, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
