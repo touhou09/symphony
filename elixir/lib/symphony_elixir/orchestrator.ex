@@ -121,7 +121,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info(:run_poll_cycle, state) do
     state = refresh_runtime_config(state)
-    state = reconcile_no_diff_running_issues(state)
+    state = reconcile_token_limited_running_issues(state)
     state = maybe_dispatch(state)
     state = schedule_tick(state, state.poll_interval_ms)
     state = %{state | poll_check_in_progress: false}
@@ -187,7 +187,7 @@ defmodule SymphonyElixir.Orchestrator do
           |> apply_codex_rate_limits(update)
 
         state =
-          case no_diff_token_limit_error(updated_running_entry) do
+          case token_limit_error(updated_running_entry) do
             nil ->
               %{state | running: Map.put(running, issue_id, updated_running_entry)}
 
@@ -229,7 +229,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down(:normal, state, issue_id, running_entry, session_id) do
-    case no_diff_token_limit_error(running_entry) do
+    case token_limit_error(running_entry) do
       nil ->
         if input_required_blocker?(running_entry) do
           block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
@@ -261,7 +261,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down(reason, state, issue_id, running_entry, session_id) do
-    case no_diff_token_limit_error(running_entry) do
+    case token_limit_error(running_entry) do
       nil ->
         if input_required_blocker?(running_entry) do
           block_input_required_agent_down(state, issue_id, running_entry, session_id, reason)
@@ -351,7 +351,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_running_issues(%State{} = state) do
-    state = reconcile_no_diff_running_issues(state)
+    state = reconcile_token_limited_running_issues(state)
     state = reconcile_stalled_running_issues(state)
     running_ids = Map.keys(state.running)
 
@@ -636,20 +636,20 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp reconcile_no_diff_running_issues(%State{} = state) do
-    Enum.reduce(state.running, state, &reconcile_no_diff_running_issue/2)
+  defp reconcile_token_limited_running_issues(%State{} = state) do
+    Enum.reduce(state.running, state, &reconcile_token_limited_running_issue/2)
   end
 
-  defp reconcile_no_diff_running_issue({issue_id, running_entry}, %State{} = state) do
+  defp reconcile_token_limited_running_issue({issue_id, running_entry}, %State{} = state) do
     cond do
       Map.has_key?(state.blocked, issue_id) -> state
-      is_nil(no_diff_token_limit_error(running_entry)) -> state
-      true -> block_no_diff_running_issue(state, issue_id, running_entry)
+      is_nil(token_limit_error(running_entry)) -> state
+      true -> block_token_limited_running_issue(state, issue_id, running_entry)
     end
   end
 
-  defp block_no_diff_running_issue(%State{} = state, issue_id, running_entry) do
-    error = no_diff_token_limit_error(running_entry)
+  defp block_token_limited_running_issue(%State{} = state, issue_id, running_entry) do
+    error = token_limit_error(running_entry)
     identifier = Map.get(running_entry, :identifier, issue_id)
     session_id = running_entry_session_id(running_entry)
 
@@ -739,6 +739,28 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp last_activity_timestamp(_running_entry), do: nil
 
+  defp token_limit_error(running_entry) when is_map(running_entry) do
+    total_token_limit_error(running_entry) || no_diff_token_limit_error(running_entry)
+  end
+
+  defp token_limit_error(_running_entry), do: nil
+
+  defp total_token_limit_error(running_entry) when is_map(running_entry) do
+    limit = Config.settings!().codex.max_total_tokens
+    total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
+
+    cond do
+      not is_integer(limit) or limit <= 0 ->
+        nil
+
+      not is_integer(total_tokens) or total_tokens < limit ->
+        nil
+
+      true ->
+        "codex exceeded total token limit: #{total_tokens} >= #{limit}"
+    end
+  end
+
   defp no_diff_token_limit_error(running_entry) when is_map(running_entry) do
     limit = Config.settings!().codex.max_no_diff_tokens
     total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
@@ -761,8 +783,6 @@ defmodule SymphonyElixir.Orchestrator do
         nil
     end
   end
-
-  defp no_diff_token_limit_error(_running_entry), do: nil
 
   defp workspace_diff_status(path) when is_binary(path) and path != "" do
     status = workspace_git_status(path)
@@ -1335,7 +1355,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp runtime_blocker_preflight(%Issue{id: issue_id}) when is_binary(issue_id) do
-    if Config.settings!().codex.max_no_diff_tokens > 0,
+    codex = Config.settings!().codex
+
+    if codex.max_no_diff_tokens > 0 or codex.max_total_tokens > 0,
       do: inspect_runtime_blocker_comments(issue_id),
       else: :ok
   end
@@ -1479,6 +1501,7 @@ defmodule SymphonyElixir.Orchestrator do
     cond do
       String.contains?(error, "codex authentication failed") -> "codex authentication"
       String.contains?(error, "squad evidence contract failed") -> "squad evidence contract"
+      String.contains?(error, "total token limit") -> "total token limit"
       String.contains?(error, "no-diff token limit") -> "no-diff token limit"
       true -> "runtime blocker"
     end

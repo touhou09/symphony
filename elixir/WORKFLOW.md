@@ -76,6 +76,7 @@ codex:
   thread_sandbox: danger-full-access
   turn_sandbox_policy:
     type: dangerFullAccess
+  max_total_tokens: 1500000
   max_no_diff_tokens: 0
 ---
 
