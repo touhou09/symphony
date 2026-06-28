@@ -138,3 +138,11 @@
 - **Test**: Local `mix format --check-formatted`, `mix specs.check`, `mix test --cover` 323/323, `mix dialyzer --format short`, `git diff --check`, and GitHub Actions run 28291515215 passed.
 - **Trap**: Enabling CI exposed sequential stale debt: Credo strict failures, an impossible 100% coverage threshold, one scheduler-sensitive assertion, and two unreachable dialyzer clauses.
 ---
+
+## 2026-06-28: Self-hosted Compose deploy runner [in-progress]
+- **What**: Registered the Mac as `symphony-compose-deploy` and changed main deploy to run on that self-hosted runner instead of GitHub-hosted SSH.
+- **Why**: `mac.dororong.dev` is reachable locally through Cloudflare Access but not by plain SSH from GitHub-hosted runners.
+- **Impact**: Main deploy can update the local checkout and rebuild only the `orchestrator` service without exposing a public SSH endpoint.
+- **Test**: GitHub runner API reports `symphony-compose-deploy` online; workflow PR validation and live deploy rerun still pending.
+- **Next**: Merge the workflow update, trigger main deploy, and verify Compose service health after rebuild.
+---

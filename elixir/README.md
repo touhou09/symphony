@@ -118,15 +118,14 @@ Trigger matrix:
 Guarding:
 - Job requires `symphony-compose` environment approval.
 - Deployment exits early if required secrets are missing:
-  - `DEPLOY_HOST`
-  - `DEPLOY_USER`
   - `DEPLOY_TARGET_PATH`
-  - `DEPLOY_SSH_KEY`
+- Job runs only on the `symphony-compose-deploy` self-hosted macOS ARM64 runner.
 - The manual dispatch path requires explicit confirmation input and a valid environment.
 
 Runtime contract:
-- The workflow deploys from `main` by checking out `main` on the remote host, resetting to
-  `origin/main`, and then running `docker compose up -d --build --no-deps orchestrator`.
+- The workflow deploys from `main` by running on the local self-hosted Mac runner, resetting
+  `DEPLOY_TARGET_PATH` to `origin/main`, and then running
+  `docker compose up -d --build --no-deps orchestrator`.
 - Ticket workspaces and `Symphony` PR behavior remain unchanged; compose-time workspace clones still
   come from the `SYMPHONY_SOURCE_BRANCH` configured in `WORKFLOW.md` (default `dev`) unless the runtime
   environment overrides it.
@@ -138,7 +137,7 @@ Rollback/manual recovery:
 - Roll back to prior image/container state by redeploying the same service from the previous git revision,
   or rebuild from a known-good branch:
   `git -C <repo> checkout <good_sha_or_branch> && docker compose up -d --build --no-deps orchestrator`
-- If the deploy path becomes unavailable, recover by SSH-ing to the target host and running:
+- If the deploy path becomes unavailable, recover on the Mac host by running:
   `cd <repo> && docker compose down --remove-orphans && docker compose up -d --build --no-deps orchestrator`
 
 ## Codex squad mode
