@@ -1442,6 +1442,94 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "squad evidence contract failures block instead of retrying as generic errors" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-squad-evidence-blocker-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(test_root)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      mkdir -p docs lib
+      cat > docs/codex-squad-evidence.md <<'EVIDENCE'
+      ## Scope
+
+      Exercise squad evidence failure handling.
+
+      ## CTO Plan
+
+      - Role: cto
+      - Model: gpt-5.5
+
+      ## Implementation
+
+      - Role: implementer
+      - Model: gpt-5.3-codex-spark
+
+      ## Verification
+
+      - [ ] verifier (gpt-5.4): FAIL - intentionally failing row.
+      EVIDENCE
+      printf '%s\\n' "$$" >> lib/squad-edit.txt
+
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-squad"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-squad"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git init -q",
+        codex_command: "#{codex_binary} app-server",
+        squad_enabled: true
+      )
+
+      issue = %Issue{
+        id: "issue-squad-evidence",
+        identifier: "MT-SQUAD-EVIDENCE",
+        title: "Block failed squad evidence",
+        description: "Evidence is missing verifier pass rows",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-SQUAD-EVIDENCE",
+        labels: []
+      }
+
+      assert {:runtime_blocker, message} = catch_exit(AgentRunner.run(issue))
+      assert message =~ "squad evidence contract failed"
+      assert message =~ "## Verification must include PASS for verifier (gpt-5.4)"
+      assert message =~ "## Verification must include PASS for final_verifier (gpt-5.5)"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner forwards timestamped codex updates to recipient" do
     test_root =
       Path.join(
