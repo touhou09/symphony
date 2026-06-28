@@ -178,6 +178,14 @@ defmodule SymphonyElixir.CoreTest do
     assert is_list(Map.get(tracker, "terminal_states"))
     assert is_list(Map.get(tracker, "active_status_ids"))
     assert is_list(Map.get(tracker, "terminal_status_ids"))
+    assert Map.get(tracker, "active_states") == ["미해결", "다시 열림", "지원 대기 중", "진행 중", "Work in progress"]
+    assert Map.get(tracker, "active_status_ids") == ["1", "4", "10073", "3", "10076"]
+
+    paused_states = ["Pending", "고객 대기 중", "Escalated", "Waiting for approval"]
+    paused_status_ids = ["10077", "10075", "10079", "10078"]
+
+    refute Enum.any?(Map.get(tracker, "active_states"), &(&1 in paused_states))
+    refute Enum.any?(Map.get(tracker, "active_status_ids"), &(&1 in paused_status_ids))
 
     hooks = Map.get(config, "hooks", %{})
     assert is_map(hooks)
