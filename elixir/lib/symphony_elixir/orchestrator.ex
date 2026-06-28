@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Orchestrator do
   import Bitwise, only: [<<<: 2]
 
   alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.Codex.AuthKeeper
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Ticket.ContentCheck
 
@@ -44,6 +45,10 @@ defmodule SymphonyElixir.Orchestrator do
       running_claims: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
+      codex_auth_checked_at: nil,
+      codex_auth_modified_at_ms: nil,
+      codex_auth_status: :unknown,
+      codex_auth_unauthorized_seen_ms: nil,
       blocked: %{},
       queued: [],
       retry_attempts: %{},
@@ -62,6 +67,7 @@ defmodule SymphonyElixir.Orchestrator do
   def init(_opts) do
     now_ms = System.monotonic_time(:millisecond)
     config = Config.settings!()
+    {codex_auth_status, codex_auth_modified_at_ms} = AuthKeeper.status_metadata(AuthKeeper.auth_path())
 
     state = %State{
       poll_interval_ms: config.polling.interval_ms,
@@ -72,7 +78,11 @@ defmodule SymphonyElixir.Orchestrator do
       tick_timer_ref: nil,
       tick_token: nil,
       codex_totals: @empty_codex_totals,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      codex_auth_checked_at: DateTime.utc_now(),
+      codex_auth_status: codex_auth_status,
+      codex_auth_modified_at_ms: codex_auth_modified_at_ms,
+      codex_auth_unauthorized_seen_ms: nil
     }
 
     state = load_running_claims(state)
@@ -121,6 +131,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info(:run_poll_cycle, state) do
     state = refresh_runtime_config(state)
+    state = refresh_codex_auth_state(state)
     state = reconcile_token_limited_running_issues(state)
     state = maybe_dispatch(state)
     state = schedule_tick(state, state.poll_interval_ms)
@@ -255,6 +266,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp handle_agent_down({:runtime_blocker, reason}, state, issue_id, running_entry, session_id) do
     error = if is_binary(reason), do: reason, else: "runtime blocker: #{inspect(reason)}"
 
+    state =
+      if is_binary(error) && String.contains?(error, "codex authentication failed") do
+        mark_codex_auth_unauthorized(state)
+      else
+        state
+      end
+
     Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}; #{error}")
 
     block_no_diff_agent_down(state, issue_id, running_entry, session_id, error)
@@ -377,6 +395,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_blocked_issues(%State{} = state) do
+    state = clear_authorization_blocked_issues(state)
     blocked_ids = Map.keys(state.blocked)
 
     if blocked_ids == [] do
@@ -446,6 +465,32 @@ defmodule SymphonyElixir.Orchestrator do
     preflight_issue_for_dispatch(issue)
   end
 
+  @spec preflight_issue_for_dispatch_for_test(Issue.t(), atom()) ::
+          :ok | {:error, [String.t()]} | {:error, {:runtime_blocker, String.t()}}
+  def preflight_issue_for_dispatch_for_test(%Issue{} = issue, :ok) do
+    preflight_issue_for_dispatch(issue, %State{codex_auth_status: :ok})
+  end
+
+  def preflight_issue_for_dispatch_for_test(%Issue{} = issue, :missing) do
+    preflight_issue_for_dispatch(issue, %State{codex_auth_status: :missing})
+  end
+
+  def preflight_issue_for_dispatch_for_test(%Issue{} = issue, :malformed) do
+    preflight_issue_for_dispatch(issue, %State{codex_auth_status: :malformed})
+  end
+
+  def preflight_issue_for_dispatch_for_test(%Issue{} = issue, :stale) do
+    preflight_issue_for_dispatch(issue, %State{codex_auth_status: :stale})
+  end
+
+  def preflight_issue_for_dispatch_for_test(%Issue{} = issue, :unauthorized) do
+    preflight_issue_for_dispatch(issue, %State{codex_auth_status: :unauthorized})
+  end
+
+  def preflight_issue_for_dispatch_for_test(%Issue{} = issue, :unknown) do
+    preflight_issue_for_dispatch(issue, %State{codex_auth_status: :unknown})
+  end
+
   @doc false
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
@@ -505,6 +550,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_blocked_issue_state(%Issue{} = issue, state, active_states, terminal_states) do
+    state = clear_authorization_blocked_issue(state, issue)
+
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Blocked issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; releasing block")
@@ -525,6 +572,54 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_blocked_issue_state(_issue, state, _active_states, _terminal_states), do: state
+
+  defp clear_authorization_blocked_issue(%State{codex_auth_status: :ok} = state, %Issue{} = issue) do
+    case Map.get(state.blocked, issue.id) do
+      %{error: error} when is_binary(error) -> maybe_release_codex_auth_blocker(state, issue.id, error)
+      _ -> state
+    end
+  end
+
+  defp clear_authorization_blocked_issue(%State{} = state, %Issue{}), do: state
+
+  defp maybe_release_codex_auth_blocker(%State{} = state, issue_id, error) do
+    if codex_auth_blocked_error?(error), do: release_issue_claim(state, issue_id), else: state
+  end
+
+  defp codex_auth_blocked_error?(error) when is_binary(error) do
+    downcase_error = String.downcase(error)
+
+    String.contains?(downcase_error, "codex authentication") or
+      String.contains?(downcase_error, "codex auth status")
+  end
+
+  defp clear_authorization_blocked_issues(%State{codex_auth_status: :ok} = state) do
+    {blocked_auth, blocked_without_auth} = Enum.split_with(state.blocked, &codex_auth_blocker_entry?/1)
+
+    auth_blocked_issue_ids = Enum.map(blocked_auth, fn {issue_id, _metadata} -> issue_id end)
+
+    if auth_blocked_issue_ids == [] do
+      state
+    else
+      Logger.info("Clearing codex-auth blockers after auth status recovered to ok")
+
+      state =
+        Map.put(
+          state,
+          :blocked,
+          Enum.into(blocked_without_auth, %{})
+        )
+
+      Enum.reduce(auth_blocked_issue_ids, state, fn issue_id, state_acc ->
+        release_issue_claim(state_acc, issue_id)
+      end)
+    end
+  end
+
+  defp clear_authorization_blocked_issues(%State{} = state), do: state
+
+  defp codex_auth_blocker_entry?({_issue_id, %{error: error}}) when is_binary(error), do: codex_auth_blocked_error?(error)
+  defp codex_auth_blocker_entry?(_entry), do: false
 
   defp reconcile_missing_running_issue_ids(%State{} = state, requested_issue_ids, issues)
        when is_list(requested_issue_ids) and is_list(issues) do
@@ -1227,7 +1322,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
     case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
-        case preflight_issue_for_dispatch(refreshed_issue) do
+        case preflight_issue_for_dispatch(refreshed_issue, state) do
           :ok ->
             do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
 
@@ -1340,8 +1435,48 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
 
-  defp preflight_issue_for_dispatch(%Issue{} = issue) do
-    with :ok <- ticket_preflight_issue(issue), do: runtime_blocker_preflight(issue)
+  defp preflight_issue_for_dispatch(%Issue{} = issue), do: preflight_issue_for_dispatch(issue, %State{codex_auth_status: :ok})
+
+  defp preflight_issue_for_dispatch(%Issue{} = issue, %State{} = state) do
+    with :ok <- ticket_preflight_issue(issue),
+         :ok <- codex_auth_preflight(state.codex_auth_status) do
+      runtime_blocker_preflight(issue)
+    end
+  end
+
+  defp codex_auth_preflight(:ok), do: :ok
+
+  defp codex_auth_preflight(status)
+       when status in [:missing, :malformed, :stale, :unauthorized, :unknown],
+       do: {:error, {:runtime_blocker, "codex auth status: #{AuthKeeper.status_reason(status)}"}}
+
+  defp codex_auth_preflight(_), do: :ok
+
+  defp refresh_codex_auth_state(%State{} = state) do
+    {next_status, modified_at_ms} =
+      AuthKeeper.status_metadata(AuthKeeper.auth_path(), stale_threshold_ms: codex_auth_stale_threshold_ms())
+
+    state
+    |> Map.put(:codex_auth_checked_at, DateTime.utc_now())
+    |> Map.put(:codex_auth_modified_at_ms, modified_at_ms)
+    |> Map.put(:codex_auth_status, next_status)
+    |> maybe_clear_authorization_blockers_for_status(next_status)
+  end
+
+  defp mark_codex_auth_unauthorized(%State{} = state) do
+    state
+    |> Map.put(:codex_auth_status, :unauthorized)
+    |> Map.put(:codex_auth_unauthorized_seen_ms, System.system_time(:millisecond))
+  end
+
+  defp maybe_clear_authorization_blockers_for_status(%State{} = state, :ok) do
+    clear_authorization_blocked_issues(state)
+  end
+
+  defp maybe_clear_authorization_blockers_for_status(%State{} = state, _status), do: state
+
+  defp codex_auth_stale_threshold_ms do
+    Application.get_env(:symphony_elixir, :codex_auth_stale_threshold_ms, AuthKeeper.stale_threshold_ms())
   end
 
   defp ticket_preflight_issue(%Issue{} = issue) do
@@ -2052,7 +2187,11 @@ defmodule SymphonyElixir.Orchestrator do
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
          poll_interval_ms: state.poll_interval_ms
-       }
+       },
+       codex_auth: AuthKeeper.render_status(state.codex_auth_status),
+       codex_auth_checked_at: state.codex_auth_checked_at,
+       codex_auth_modified_at_ms: state.codex_auth_modified_at_ms,
+       codex_auth_unauthorized_seen_ms: state.codex_auth_unauthorized_seen_ms
      }, state}
   end
 

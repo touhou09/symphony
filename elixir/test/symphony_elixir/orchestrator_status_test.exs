@@ -149,6 +149,92 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            }
   end
 
+  test "auth recovery clears blocked codex-auth issue when auth status is ok" do
+    test_root =
+      Path.join(System.tmp_dir!(), "symphony-exauth-recovery-#{System.unique_integer([:positive])}")
+
+    auth_json = Path.join(test_root, "auth.json")
+    previous_auth_path = Application.get_env(:symphony_elixir, :codex_auth_path)
+    workflow_file = Workflow.workflow_file_path()
+
+    try do
+      File.mkdir_p!(Path.dirname(auth_json))
+      File.write!(auth_json, ~s({"access_token":"abc","scope":"default"}))
+      write_workflow_file!(workflow_file, tracker_kind: "memory", max_concurrent_agents: 1)
+
+      Application.put_env(:symphony_elixir, :codex_auth_path, auth_json)
+
+      Application.put_env(
+        :symphony_elixir,
+        :memory_tracker_issues,
+        [
+          %Issue{
+            id: "issue-auth-blocked-retry",
+            identifier: "MT-BLOCKED-RECOVERY",
+            state: "Todo",
+            title: "Auth-recovery blocked issue",
+            url: "https://example.org/issues/MT-BLOCKED-RECOVERY"
+          }
+        ]
+      )
+
+      orchestrator_name = Module.concat(__MODULE__, :AuthRecoveryOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      issue = %Issue{
+        id: "issue-auth-blocked-retry",
+        identifier: "MT-BLOCKED-RECOVERY"
+      }
+
+      blocked_entry = %{
+        issue: issue,
+        blocked_at: DateTime.utc_now(),
+        error: "codex authentication failed: HTTP 401 Unauthorized",
+        identifier: issue.identifier,
+        issue_url: "https://example.org/issues/MT-BLOCKED-RECOVERY"
+      }
+
+      initial_state = :sys.get_state(pid)
+
+      :sys.replace_state(pid, fn _ ->
+        initial_state
+        |> Map.put(:blocked, %{issue.id => blocked_entry})
+        |> Map.put(:claimed, MapSet.put(MapSet.new(), issue.id))
+        |> Map.put(:queued, [])
+        |> Map.put(:codex_auth_status, :unauthorized)
+        |> Map.put(:running, %{})
+      end)
+
+      send(pid, :run_poll_cycle)
+
+      refreshed_state =
+        wait_for_orchestrator_state(pid, fn state ->
+          state.codex_auth_status == :ok and state.blocked == %{} and state.claimed == MapSet.new()
+        end)
+
+      assert refreshed_state.codex_auth_status == :ok
+      assert refreshed_state.blocked == %{}
+      assert refreshed_state.claimed == MapSet.new()
+    after
+      File.rm_rf(test_root)
+
+      if previous_auth_path do
+        Application.put_env(:symphony_elixir, :codex_auth_path, previous_auth_path)
+      else
+        Application.delete_env(:symphony_elixir, :codex_auth_path)
+      end
+
+      Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      WorkflowStore.force_reload()
+    end
+  end
+
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do
     issue_id = "issue-usage-snapshot"
 
@@ -2438,6 +2524,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     do_wait_for_snapshot(pid, predicate, deadline_ms)
   end
 
+  defp wait_for_orchestrator_state(pid, predicate, timeout_ms \\ 500) when is_function(predicate, 1) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_orchestrator_state(pid, predicate, deadline_ms)
+  end
+
   defp wait_for_completed_poll_snapshot(_pid, %{polling: %{checking?: false}} = snapshot), do: snapshot
 
   defp wait_for_completed_poll_snapshot(pid, %{polling: %{checking?: true}}) do
@@ -2466,6 +2557,21 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       else
         Process.sleep(5)
         do_wait_for_snapshot(pid, predicate, deadline_ms)
+      end
+    end
+  end
+
+  defp do_wait_for_orchestrator_state(pid, predicate, deadline_ms) do
+    state = :sys.get_state(pid)
+
+    if predicate.(state) do
+      state
+    else
+      if System.monotonic_time(:millisecond) >= deadline_ms do
+        flunk("timed out waiting for orchestrator state: #{inspect(state)}")
+      else
+        Process.sleep(5)
+        do_wait_for_orchestrator_state(pid, predicate, deadline_ms)
       end
     end
   end

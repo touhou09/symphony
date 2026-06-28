@@ -393,6 +393,10 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
              "counts" => %{"running" => 1, "retrying" => 1, "blocked" => 1},
+             "codex_auth" => state_payload["codex_auth"],
+             "codex_auth_checked_at" => state_payload["codex_auth_checked_at"],
+             "codex_auth_modified_at" => state_payload["codex_auth_modified_at"],
+             "codex_auth_unauthorized_seen_at" => state_payload["codex_auth_unauthorized_seen_at"],
              "running" => [
                %{
                  "issue_id" => "issue-http",
@@ -640,6 +644,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "rendered"
     assert html =~ "turn blocked: waiting for user input"
     assert html =~ "Runtime"
+    assert html =~ "Codex auth"
     assert html =~ "Live"
     assert html =~ "Offline"
     assert html =~ "Copy ID"
@@ -832,6 +837,10 @@ defmodule SymphonyElixir.ExtensionsTest do
           last_codex_timestamp: DateTime.utc_now()
         }
       ],
+      codex_auth: "ok",
+      codex_auth_checked_at: DateTime.utc_now(),
+      codex_auth_modified_at_ms: DateTime.to_unix(DateTime.utc_now(), :millisecond),
+      codex_auth_unauthorized_seen_ms: nil,
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
       rate_limits: %{"primary" => %{"remaining" => 11}}
     }

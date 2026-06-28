@@ -110,6 +110,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="metric-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
             <p class="metric-detail">Total Codex runtime across completed and active sessions.</p>
           </article>
+
+          <article class="metric-card">
+            <p class="metric-label">Codex auth</p>
+            <p class="metric-value numeric"><%= @payload.codex_auth || "unknown" %></p>
+            <p class="metric-detail">Checked: <%= @payload.codex_auth_checked_at || "n/a" %></p>
+          </article>
         </section>
 
         <section class="section-card">

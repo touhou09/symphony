@@ -550,6 +550,29 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp maybe_handle_approval_request(
          port,
+         "account/chatgptAuthTokens/refresh",
+         %{"id" => id} = payload,
+         payload_string,
+         on_message,
+         metadata,
+         _tool_executor,
+         _auto_approve_requests
+       ) do
+    send_message(port, %{
+      "id" => id,
+      "error" => %{
+        "code" => -32_601,
+        "message" => "auth token refresh is unsupported in this runtime"
+      }
+    })
+
+    emit_message(on_message, :notification, %{payload: payload, raw: payload_string}, metadata)
+
+    :approved
+  end
+
+  defp maybe_handle_approval_request(
+         port,
          "item/commandExecution/requestApproval",
          %{"id" => id} = payload,
          payload_string,
