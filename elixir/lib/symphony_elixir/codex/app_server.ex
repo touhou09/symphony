@@ -432,27 +432,34 @@ defmodule SymphonyElixir.Codex.AppServer do
         receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
 
       {:error, _reason} ->
-        log_non_json_stream_line(payload_string, "turn stream")
+        handle_non_json_turn_line(port, on_message, payload_string, timeout_ms, tool_executor, auto_approve_requests)
+    end
+  end
 
-        case stream_runtime_blocker(payload_string) do
-          nil ->
-            if protocol_message_candidate?(payload_string) do
-              emit_message(
-                on_message,
-                :malformed,
-                %{
-                  payload: payload_string,
-                  raw: payload_string
-                },
-                metadata_from_message(port, %{raw: payload_string})
-              )
-            end
+  defp handle_non_json_turn_line(port, on_message, payload_string, timeout_ms, tool_executor, auto_approve_requests) do
+    log_non_json_stream_line(payload_string, "turn stream")
 
-            receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+    case stream_runtime_blocker(payload_string) do
+      nil ->
+        emit_malformed_protocol_candidate(port, on_message, payload_string)
+        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
 
-          blocker ->
-            {:error, {:runtime_blocker, blocker}}
-        end
+      blocker ->
+        {:error, {:runtime_blocker, blocker}}
+    end
+  end
+
+  defp emit_malformed_protocol_candidate(port, on_message, payload_string) do
+    if protocol_message_candidate?(payload_string) do
+      emit_message(
+        on_message,
+        :malformed,
+        %{
+          payload: payload_string,
+          raw: payload_string
+        },
+        metadata_from_message(port, %{raw: payload_string})
+      )
     end
   end
 
@@ -976,12 +983,16 @@ defmodule SymphonyElixir.Codex.AppServer do
         with_timeout_response(port, request_id, timeout_ms, "")
 
       {:error, _} ->
-        log_non_json_stream_line(payload, "response stream")
+        handle_non_json_response_line(port, request_id, payload, timeout_ms)
+    end
+  end
 
-        case stream_runtime_blocker(payload) do
-          nil -> with_timeout_response(port, request_id, timeout_ms, "")
-          blocker -> {:error, {:runtime_blocker, blocker}}
-        end
+  defp handle_non_json_response_line(port, request_id, payload, timeout_ms) do
+    log_non_json_stream_line(payload, "response stream")
+
+    case stream_runtime_blocker(payload) do
+      nil -> with_timeout_response(port, request_id, timeout_ms, "")
+      blocker -> {:error, {:runtime_blocker, blocker}}
     end
   end
 
