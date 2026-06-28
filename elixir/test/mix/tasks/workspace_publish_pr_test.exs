@@ -44,6 +44,24 @@ defmodule Mix.Tasks.Workspace.PublishPrTest do
     end)
   end
 
+  test "refuses to publish from the base branch before pushing" do
+    with_fake_binaries(fn log_path ->
+      with_env(%{"FAKE_GIT_BRANCH" => "dev", "GH_TOKEN" => "", "GITHUB_TOKEN" => ""}, fn ->
+        assert_raise Mix.Error, ~r/Refusing to publish PR from base branch dev/, fn ->
+          capture_io(fn ->
+            PublishPr.run(["--repo", "touhou09/symphony", "--base", "dev"])
+          end)
+        end
+
+        log = File.read!(log_path)
+        refute log =~ "git add -A"
+        refute log =~ "git commit"
+        refute log =~ "git push"
+        refute log =~ "gh pr create"
+      end)
+    end)
+  end
+
   test "skips evidence-only publish when existing PR head is already green" do
     with_fake_binaries(fn log_path ->
       with_env(
@@ -133,6 +151,10 @@ defmodule Mix.Tasks.Workspace.PublishPrTest do
     printf 'git %s\\n' "$*" >> "$COMMAND_LOG"
 
     if [ "$1" = "branch" ] && [ "$2" = "--show-current" ]; then
+      if [ -n "$FAKE_GIT_BRANCH" ]; then
+        printf '%s\\n' "$FAKE_GIT_BRANCH"
+        exit 0
+      fi
       printf 'sym-13-no-diff-guard\\n'
       exit 0
     fi

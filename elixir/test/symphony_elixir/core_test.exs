@@ -376,12 +376,14 @@ defmodule SymphonyElixir.CoreTest do
     issue_id = "issue-1"
     issue_identifier = "MT-555"
     workspace = Path.join(test_root, issue_identifier)
+    hook_output = Path.join(test_root, "non-active-after-complete.txt")
 
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: test_root,
         tracker_active_states: ["Todo", "In Progress", "In Review"],
-        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"]
+        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
+        hook_after_complete: "printf '%s' non-active-after-complete > #{hook_output}"
       )
 
       File.mkdir_p!(test_root)
@@ -401,6 +403,7 @@ defmodule SymphonyElixir.CoreTest do
             ref: nil,
             identifier: issue_identifier,
             issue: %Issue{id: issue_id, state: "Todo", identifier: issue_identifier},
+            workspace_path: workspace,
             started_at: DateTime.utc_now()
           }
         },
@@ -424,6 +427,7 @@ defmodule SymphonyElixir.CoreTest do
       refute MapSet.member?(updated_state.claimed, issue_id)
       refute Process.alive?(agent_pid)
       assert File.exists?(workspace)
+      refute File.exists?(hook_output)
     after
       File.rm_rf(test_root)
     end
@@ -496,7 +500,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "non-active retry completion runs after_complete hook before releasing claim" do
+  test "non-active retry completion releases claim without running after_complete hook" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -539,7 +543,7 @@ defmodule SymphonyElixir.CoreTest do
         })
 
       refute MapSet.member?(updated_state.claimed, issue_id)
-      assert File.read!(hook_output) == "after-complete"
+      refute File.exists?(hook_output)
       assert File.exists?(workspace)
     after
       File.rm_rf(test_root)

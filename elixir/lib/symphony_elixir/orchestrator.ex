@@ -588,7 +588,7 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false, issue)
+        terminate_running_issue(state, issue.id, false)
     end
   end
 
@@ -1821,7 +1821,6 @@ defmodule SymphonyElixir.Orchestrator do
 
       true ->
         Logger.debug("Issue left active states, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}")
-        run_after_complete_hook(metadata[:workspace_path], issue, metadata[:worker_host])
 
         {:noreply, release_issue_claim(state, issue_id)}
     end
