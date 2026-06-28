@@ -183,6 +183,71 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server treats Codex Responses 401 as a runtime blocker" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-auth-blocker-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-AUTH")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-auth"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-auth"}}}'
+            ;;
+          4)
+            printf '%s\\n' 'failed to connect to websocket: HTTP error: 401 Unauthorized, url: wss://api.openai.com/v1/responses'
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-auth-blocker",
+        identifier: "MT-AUTH",
+        title: "Detect Codex auth failure",
+        description: "Ensure 401s are surfaced as runtime blockers",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-AUTH",
+        labels: []
+      }
+
+      assert {:error, {:runtime_blocker, message}} = AppServer.run(workspace, "auth check", issue)
+      assert message == "codex authentication failed: HTTP 401 Unauthorized from Responses API"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server marks request-for-input events as a hard failure" do
     test_root =
       Path.join(
