@@ -69,7 +69,8 @@ jobs:
 
           cd "${DEPLOY_TARGET_PATH}"
           git fetch --prune origin
-          git checkout main
+          git reset --hard
+          git checkout -B main origin/main
           git reset --hard origin/main
           /usr/local/bin/docker compose up -d --build --no-deps orchestrator
           /usr/local/bin/docker compose ps orchestrator

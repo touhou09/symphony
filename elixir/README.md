@@ -124,7 +124,7 @@ Guarding:
 
 Runtime contract:
 - The workflow deploys from `main` by running on the local self-hosted Mac runner, resetting
-  `DEPLOY_TARGET_PATH` to `origin/main`, and then running
+  tracked changes in `DEPLOY_TARGET_PATH` to `origin/main`, and then running
   `docker compose up -d --build --no-deps orchestrator`.
 - Ticket workspaces and `Symphony` PR behavior remain unchanged; compose-time workspace clones still
   come from the `SYMPHONY_SOURCE_BRANCH` configured in `WORKFLOW.md` (default `dev`) unless the runtime
