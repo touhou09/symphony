@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Codex.ConfigFilter do
   @safe_auth_subpath [".codex", "auth.json"]
   @host_config_path "/run/symphony/codex-host/config.toml"
   @host_auth_path "/root/.codex/auth.json"
+  @workspace_runtime_excludes [".codex/", ".hex/", ".mix/"]
 
   @spec inject_sandbox_config(String.t(), Path.t(), keyword()) ::
           {:ok, String.t()} | {:error, term()}
@@ -13,18 +14,97 @@ defmodule SymphonyElixir.Codex.ConfigFilter do
     source_config_path = Keyword.get(opts, :source_config_path, @host_config_path)
     source_auth_path = Keyword.get(opts, :source_auth_path, @host_auth_path)
 
+    case ensure_workspace_runtime_excludes(workspace) do
+      :ok -> inject_host_config(codex_command, workspace, source_config_path, source_auth_path)
+      {:error, reason} -> {:error, {:safe_config_generation_failed, reason}}
+    end
+  end
+
+  defp inject_host_config(codex_command, workspace, source_config_path, source_auth_path) do
     if File.regular?(source_config_path) do
-      with {:ok, safe_config_path} <- safe_config_path(workspace),
-           :ok <- write_sanitized_config(source_config_path, safe_config_path),
-           :ok <- link_host_auth(source_auth_path, safe_auth_path(workspace)),
-           true <- String.trim(safe_config_path) != "" do
-        {:ok, append_config_arg(codex_command, workspace)}
-      else
-        {:error, reason} -> {:error, {:safe_config_generation_failed, reason}}
-        false -> {:error, {:invalid_safe_config_path, workspace}}
-      end
+      write_safe_host_config(codex_command, workspace, source_config_path, source_auth_path)
     else
       {:ok, codex_command}
+    end
+  end
+
+  defp write_safe_host_config(codex_command, workspace, source_config_path, source_auth_path) do
+    with {:ok, safe_config_path} <- safe_config_path(workspace),
+         :ok <- write_sanitized_config(source_config_path, safe_config_path),
+         :ok <- link_host_auth(source_auth_path, safe_auth_path(workspace)),
+         true <- String.trim(safe_config_path) != "" do
+      {:ok, append_config_arg(codex_command, workspace)}
+    else
+      {:error, reason} -> {:error, {:safe_config_generation_failed, reason}}
+      false -> {:error, {:invalid_safe_config_path, workspace}}
+    end
+  end
+
+  defp ensure_workspace_runtime_excludes(workspace) when is_binary(workspace) do
+    case git_exclude_path(workspace) do
+      {:ok, exclude_path} ->
+        with :ok <- File.mkdir_p(Path.dirname(exclude_path)),
+             {:ok, contents} <- read_optional_file(exclude_path),
+             next_contents <- append_missing_excludes(contents, @workspace_runtime_excludes),
+             :ok <- File.write(exclude_path, next_contents) do
+          :ok
+        else
+          {:error, reason} -> {:error, {:git_exclude_update_failed, reason}}
+        end
+
+      :not_git ->
+        :ok
+
+      {:error, reason} ->
+        {:error, {:git_exclude_path_failed, reason}}
+    end
+  end
+
+  defp git_exclude_path(workspace) when is_binary(workspace) do
+    case System.cmd("git", ["-C", workspace, "rev-parse", "--git-path", "info/exclude"], stderr_to_stdout: true) do
+      {path, 0} ->
+        path =
+          path
+          |> String.trim()
+          |> Path.expand(workspace)
+
+        {:ok, path}
+
+      {_output, _status} ->
+        :not_git
+    end
+  rescue
+    error -> {:error, error}
+  end
+
+  defp read_optional_file(path) when is_binary(path) do
+    case File.read(path) do
+      {:ok, contents} -> {:ok, contents}
+      {:error, :enoent} -> {:ok, ""}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp append_missing_excludes(contents, patterns) when is_binary(contents) and is_list(patterns) do
+    existing =
+      contents
+      |> String.split("\n", trim: true)
+      |> MapSet.new(&String.trim/1)
+
+    missing = Enum.reject(patterns, &MapSet.member?(existing, &1))
+
+    cond do
+      missing == [] ->
+        contents
+
+      contents == "" ->
+        Enum.join(missing, "\n") <> "\n"
+
+      String.ends_with?(contents, "\n") ->
+        contents <> Enum.join(missing, "\n") <> "\n"
+
+      true ->
+        contents <> "\n" <> Enum.join(missing, "\n") <> "\n"
     end
   end
 
