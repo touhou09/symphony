@@ -252,23 +252,19 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp handle_agent_down(
+         {:runtime_blocker, "codex authentication failed" <> _ = error},
+         state,
+         issue_id,
+         running_entry,
+         session_id
+       ) do
+    handle_runtime_blocker_agent_down(mark_codex_auth_unauthorized(state), issue_id, running_entry, session_id, error)
+  end
+
   defp handle_agent_down({:runtime_blocker, reason}, state, issue_id, running_entry, session_id) do
     error = if is_binary(reason), do: reason, else: "runtime blocker: #{inspect(reason)}"
-
-    state =
-      if String.contains?(error, "codex authentication failed") do
-        mark_codex_auth_unauthorized(state)
-      else
-        state
-      end
-
-    if retryable_squad_evidence_contract_error?(error) do
-      retry_squad_evidence_contract_agent_down(state, issue_id, running_entry, session_id, error)
-    else
-      Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}; #{error}")
-
-      block_no_diff_agent_down(state, issue_id, running_entry, session_id, error)
-    end
+    handle_runtime_blocker_agent_down(state, issue_id, running_entry, session_id, error)
   end
 
   defp handle_agent_down(reason, state, issue_id, running_entry, session_id) do
@@ -282,6 +278,16 @@ defmodule SymphonyElixir.Orchestrator do
 
       error ->
         block_no_diff_agent_down(state, issue_id, running_entry, session_id, error)
+    end
+  end
+
+  defp handle_runtime_blocker_agent_down(state, issue_id, running_entry, session_id, error) do
+    if retryable_squad_evidence_contract_error?(error) do
+      retry_squad_evidence_contract_agent_down(state, issue_id, running_entry, session_id, error)
+    else
+      Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}; #{error}")
+
+      block_no_diff_agent_down(state, issue_id, running_entry, session_id, error)
     end
   end
 
@@ -702,9 +708,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp clear_authorization_blocked_issues(%State{codex_auth_status: :ok} = state) do
-    {blocked_auth, blocked_without_auth} = Enum.split_with(state.blocked, &codex_auth_blocker_entry?/1)
-
-    auth_blocked_issue_ids = Enum.map(blocked_auth, fn {issue_id, _metadata} -> issue_id end)
+    {blocked_without_auth, auth_blocked_issue_ids} =
+      Enum.reduce(state.blocked, {%{}, []}, fn {issue_id, metadata}, {blocked_acc, auth_issue_ids} ->
+        if codex_auth_blocker_metadata?(metadata) do
+          {blocked_acc, [issue_id | auth_issue_ids]}
+        else
+          {Map.put(blocked_acc, issue_id, metadata), auth_issue_ids}
+        end
+      end)
 
     if auth_blocked_issue_ids == [] do
       state
@@ -715,7 +726,7 @@ defmodule SymphonyElixir.Orchestrator do
         Map.put(
           state,
           :blocked,
-          Enum.into(blocked_without_auth, %{})
+          blocked_without_auth
         )
 
       Enum.reduce(auth_blocked_issue_ids, state, fn issue_id, state_acc ->
@@ -726,8 +737,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp clear_authorization_blocked_issues(%State{} = state), do: state
 
-  defp codex_auth_blocker_entry?({_issue_id, %{error: error}}) when is_binary(error), do: codex_auth_blocked_error?(error)
-  defp codex_auth_blocker_entry?(_entry), do: false
+  defp codex_auth_blocker_metadata?(%{error: error}) when is_binary(error), do: codex_auth_blocked_error?(error)
+  defp codex_auth_blocker_metadata?(_metadata), do: false
 
   defp reconcile_missing_running_issue_ids(%State{} = state, requested_issue_ids, issues)
        when is_list(requested_issue_ids) and is_list(issues) do
@@ -1576,12 +1587,16 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp codex_auth_status_preflight(:ok), do: :ok
-
-  defp codex_auth_status_preflight(status)
-       when status in [:missing, :malformed, :stale, :unauthorized, :unknown],
-       do: {:error, {:runtime_blocker, "codex auth status: #{AuthKeeper.status_reason(status)}"}}
-
+  defp codex_auth_status_preflight(:missing), do: codex_auth_status_blocker(:missing)
+  defp codex_auth_status_preflight(:malformed), do: codex_auth_status_blocker(:malformed)
+  defp codex_auth_status_preflight(:stale), do: codex_auth_status_blocker(:stale)
+  defp codex_auth_status_preflight(:unauthorized), do: codex_auth_status_blocker(:unauthorized)
+  defp codex_auth_status_preflight(:unknown), do: codex_auth_status_blocker(:unknown)
   defp codex_auth_status_preflight(_), do: :ok
+
+  defp codex_auth_status_blocker(status) do
+    {:error, {:runtime_blocker, "codex auth status: #{AuthKeeper.status_reason(status)}"}}
+  end
 
   defp refresh_codex_auth_state(%State{} = state) do
     {next_status, modified_at_ms} =
