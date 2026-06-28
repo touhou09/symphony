@@ -272,6 +272,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
+      field(:max_total_tokens, :integer, default: 0)
       field(:max_no_diff_tokens, :integer, default: 0)
     end
 
@@ -288,6 +289,7 @@ defmodule SymphonyElixir.Config.Schema do
           :turn_timeout_ms,
           :read_timeout_ms,
           :stall_timeout_ms,
+          :max_total_tokens,
           :max_no_diff_tokens
         ],
         empty_values: []
@@ -296,6 +298,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:max_total_tokens, greater_than_or_equal_to: 0)
       |> validate_number(:max_no_diff_tokens, greater_than_or_equal_to: 0)
     end
   end

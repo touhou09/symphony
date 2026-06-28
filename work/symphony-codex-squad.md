@@ -80,41 +80,6 @@
 - **Trap**: A prior smoke with old guard exited clean with no persistent diff; the fix added the normal `:DOWN` guard and regression test for that exact path.
 ---
 
-## 2026-06-27: Local autostart recovery [done]
-- **What**: Added login-time recovery so Colima starts first and the headless Symphony orchestrator is reconciled into a running Compose service.
-- **Why**: The Mac should recover Tailscale and Symphony after power or login cycles without manually replaying the setup commands.
-- **Impact**: Local SYM orchestration resumes on this Mac after login, with Docker keeping the orchestrator alive unless it is explicitly stopped.
-- **Test**: LaunchAgent enabled and run exit code 0, Colima running, `docker compose ps` showed `symphony-orchestrator-1` Up, and Tailscale status returned `100.66.205.12`.
----
-
-## 2026-06-27: Fork source deployment wiring [done]
-- **What**: Pointed the local Compose deployment at the `touhou09/symphony` fork and made workspace bootstrap honor an explicit source branch.
-- **Why**: Using only the fork URL would still clone the default branch, so Jira workspaces needed branch-aware cloning to run the active adapter branch.
-- **Impact**: New workspaces after the next orchestrator recreate clone `feat/jira-tracker-adapter` from the fork instead of upstream `openai/symphony`.
-- **Test**: Compose config resolved `SYMPHONY_SOURCE_REPO=https://github.com/touhou09/symphony` and `SYMPHONY_SOURCE_BRANCH=feat/jira-tracker-adapter`; running container was intentionally left untouched while active agents continue.
----
-
-## 2026-06-27: Fork image redeploy [done]
-- **What**: Captured active SYM-6/SYM-11 workspace diffs, rebuilt the orchestrator image from the local fork checkout, force-recreated the Compose service, and retargeted existing workspaces to the fork remote.
-- **Why**: Env-only recreate made future clones fork-aware, but a real fork deployment also needed the container image rebuilt and existing active workspaces moved off the upstream remote.
-- **Impact**: The running orchestrator now uses the fork repo/branch settings while interrupted active Jira work was restarted against preserved workspaces.
-- **Test**: `docker compose build orchestrator` succeeded, `docker compose up -d --force-recreate orchestrator` started, container env reports `touhou09/symphony` and `feat/jira-tracker-adapter`, restart policy is `unless-stopped`, and SYM-6/SYM-11 diffs remained present.
----
-
-## 2026-06-27: Completion PR publish hook [done]
-- **What**: Added a workspace completion hook that commits, pushes, and opens or discovers a GitHub PR after Symphony work leaves active execution, then redeployed the Compose orchestrator.
-- **Why**: Finished Jira work must leave a reviewable branch/PR even when the unattended agent exits before manually attaching one.
-- **Impact**: Completed fork workspaces now publish against `touhou09/symphony` with base `feat/jira-tracker-adapter`; SYM-6, SYM-11, and the feature branch are open as PR #1, #2, and #3 with the `symphony` label.
-- **Test**: `mix format`, targeted ExUnit 65/65, `git push` for all branches, GitHub PR lookup confirmed PRs open, Docker build/up succeeded, container env points at the fork branch, and the named volume preserved SYM-6/SYM-11 commits.
----
-
-## 2026-06-27: Main/dev branch flow [done]
-- **What**: Collapsed the fork branch model to `main` and `dev`, with Compose/workflow defaults cloning `touhou09/symphony` from `dev` and publishing completed work back to `dev`.
-- **Why**: Symphony needs one predictable development lane: work accumulates on `dev`, then review/merge moves the integrated result to `main`.
-- **Impact**: New unattended workspaces and completion PRs now target the fork's `dev` branch by default instead of the deleted feature branch; PR #4 merged the dev lane into `main`.
-- **Test**: Branch listing confirmed only `origin/main` and `origin/dev` on the fork; `mix format` and targeted ExUnit 65/65 passed; Docker build/up succeeded; container env reports `touhou09/symphony`, `dev`, and PR base `dev`.
----
-
 ## 2026-06-27: SYM-12 CI/CD E2E smoke [blocked]
 - **What**: Created SYM-12 for CI checks plus merge-triggered CD and let the live Symphony orchestrator dispatch it from Jira.
 - **Why**: Verify the new `dev`-based Symphony flow with a realistic ticket that should produce a branch, PR, and review handoff.
@@ -139,11 +104,19 @@
 - **Trap**: Enabling CI exposed sequential stale debt: Credo strict failures, an impossible 100% coverage threshold, one scheduler-sensitive assertion, and two unreachable dialyzer clauses.
 ---
 
-## 2026-06-28: Self-hosted Compose deploy runner [in-progress]
+## 2026-06-28: Self-hosted Compose deploy runner [done]
 - **What**: Registered the Mac as `symphony-compose-deploy` and changed main deploy to run on that self-hosted runner instead of GitHub-hosted SSH.
 - **Why**: `mac.dororong.dev` is reachable locally through Cloudflare Access but not by plain SSH from GitHub-hosted runners.
 - **Impact**: Main deploy can update the local checkout and rebuild only the `orchestrator` service without exposing a public SSH endpoint.
-- **Test**: GitHub runner API reports `symphony-compose-deploy` online; first main deploy reached the runner but failed on dirty target checkout.
+- **Test**: GitHub runner API reported `symphony-compose-deploy` online; PR #23 main push ran `make-all` in 47s and deploy in 37s; Compose recreated `symphony-orchestrator-1`.
 - **Trap**: The deploy target was still on local `dev` with tracked worklog edits; workflow now resets tracked changes before switching to `main`.
-- **Next**: Merge the workflow update, trigger main deploy, and verify Compose service health after rebuild.
+---
+
+## 2026-06-28: Total token budget blocker [in-progress]
+- **What**: Added a configurable `codex.max_total_tokens` guard and set the Compose workflow default to 1,500,000 tokens per running issue.
+- **Why**: Live SYM-23 e2e proved auth was fixed but a diff-producing role could still climb past 6M tokens, bypassing the no-diff guard.
+- **Impact**: Future runaway issues stop as runtime blockers even when workspace diffs exist, preserving the Jira workpad evidence and active slot state.
+- **Test**: `mix format --check-formatted`, `mix test` targeted 54/54, total-limit test 1/1, `orchestrator_status_test` 51/51, `workspace_and_config_test` 53/53, `mix specs.check`, `mix dialyzer --format short`, and lib-only strict Credo passed.
+- **Trap**: Local strict Credo still crashes on existing test sigils under Elixir 1.20.1; CI uses Elixir 1.19.5 for the full check.
+- **Next**: Merge to dev/main, redeploy, and verify SYM-21/SYM-23 are blocked or resumed under the new budget.
 ---

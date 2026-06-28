@@ -1054,6 +1054,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       codex_turn_timeout_ms: nil,
       codex_read_timeout_ms: nil,
       codex_stall_timeout_ms: nil,
+      codex_max_total_tokens: nil,
       codex_max_no_diff_tokens: nil,
       tracker_api_token: nil,
       tracker_project_slug: nil
@@ -1104,6 +1105,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.turn_timeout_ms == 3_600_000
     assert config.codex.read_timeout_ms == 5_000
     assert config.codex.stall_timeout_ms == 300_000
+    assert config.codex.max_total_tokens == 0
     assert config.codex.max_no_diff_tokens == 0
 
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -1188,6 +1190,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), codex_stall_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.stall_timeout_ms"
+
+    write_workflow_file!(Workflow.workflow_file_path(), codex_max_total_tokens: "bad")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.max_total_tokens"
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_max_no_diff_tokens: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
