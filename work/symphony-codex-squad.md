@@ -143,6 +143,7 @@
 - **What**: Registered the Mac as `symphony-compose-deploy` and changed main deploy to run on that self-hosted runner instead of GitHub-hosted SSH.
 - **Why**: `mac.dororong.dev` is reachable locally through Cloudflare Access but not by plain SSH from GitHub-hosted runners.
 - **Impact**: Main deploy can update the local checkout and rebuild only the `orchestrator` service without exposing a public SSH endpoint.
-- **Test**: GitHub runner API reports `symphony-compose-deploy` online; workflow PR validation and live deploy rerun still pending.
+- **Test**: GitHub runner API reports `symphony-compose-deploy` online; first main deploy reached the runner but failed on dirty target checkout.
+- **Trap**: The deploy target was still on local `dev` with tracked worklog edits; workflow now resets tracked changes before switching to `main`.
 - **Next**: Merge the workflow update, trigger main deploy, and verify Compose service health after rebuild.
 ---
