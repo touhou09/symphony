@@ -917,15 +917,17 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
     state = :sys.get_state(pid)
+    observed_at_ms = System.monotonic_time(:millisecond)
 
     refute Map.has_key?(state.running, issue_id)
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, -500, 1_100)
+    assert_due_scheduled_between(due_at_ms, sent_at_ms, observed_at_ms, 1_000)
   end
 
   test "squad normal worker exit runs after_complete hook and completes without active-state continuation retry" do
@@ -1417,6 +1419,11 @@ defmodule SymphonyElixir.CoreTest do
 
     assert remaining_ms >= observed_lower_bound_ms
     assert remaining_ms <= max_remaining_ms
+  end
+
+  defp assert_due_scheduled_between(due_at_ms, earliest_start_ms, latest_start_ms, delay_ms) do
+    assert due_at_ms >= earliest_start_ms + delay_ms
+    assert due_at_ms <= latest_start_ms + delay_ms + 250
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
