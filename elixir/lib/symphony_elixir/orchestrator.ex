@@ -2036,8 +2036,6 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp cap_recovered_running_claims(_running_claims), do: %{}
-
   defp valid_running_claim_expiry?(expiry_ms), do: is_integer(expiry_ms) and expiry_ms > 0
 
   defp dispatch_claim_ttl, do: @dispatch_claim_ttl_ms
