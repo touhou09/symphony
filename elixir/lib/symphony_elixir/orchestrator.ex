@@ -235,21 +235,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp handle_agent_down(:normal, state, issue_id, running_entry, session_id) do
     case token_limit_error(running_entry) do
       nil ->
-        if input_required_blocker?(running_entry) do
-          block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
-        else
-          case maybe_run_squad_completion_hook(running_entry) do
-            :ok ->
-              state
-              |> complete_issue(issue_id)
-              |> maybe_schedule_completion_continuation(issue_id, running_entry, session_id)
-
-            {:error, error} ->
-              Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}; #{error}")
-
-              block_issue_from_entry(state, issue_id, running_entry, error)
-          end
-        end
+        handle_normal_agent_without_token_limit(state, issue_id, running_entry, session_id)
 
       error ->
         block_no_diff_agent_down(state, issue_id, running_entry, session_id, error)
@@ -279,6 +265,28 @@ defmodule SymphonyElixir.Orchestrator do
 
       error ->
         block_no_diff_agent_down(state, issue_id, running_entry, session_id, error)
+    end
+  end
+
+  defp handle_normal_agent_without_token_limit(state, issue_id, running_entry, session_id) do
+    if input_required_blocker?(running_entry) do
+      block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
+    else
+      complete_normal_agent_down(state, issue_id, running_entry, session_id)
+    end
+  end
+
+  defp complete_normal_agent_down(state, issue_id, running_entry, session_id) do
+    case maybe_run_squad_completion_hook(running_entry) do
+      :ok ->
+        state
+        |> complete_issue(issue_id)
+        |> maybe_schedule_completion_continuation(issue_id, running_entry, session_id)
+
+      {:error, error} ->
+        Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}; #{error}")
+
+        block_issue_from_entry(state, issue_id, running_entry, error)
     end
   end
 
@@ -1225,29 +1233,34 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp should_dispatch_issue?(
          %Issue{} = issue,
-         %State{
-           running: running,
-           claimed: claimed,
-           blocked: blocked,
-           completed: completed,
-           running_claims: running_claims
-         } = state,
+         %State{running: running} = state,
          active_states,
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
-      !MapSet.member?(claimed, issue.id) and
-      !MapSet.member?(completed, issue.id) and
-      !Map.has_key?(running, issue.id) and
-      !Map.has_key?(running_claims, issue.id) and
-      !Map.has_key?(blocked, issue.id) and
-      available_slots(state) > 0 and
-      state_slots_available?(issue, running) and
-      worker_slots_available?(state)
+      issue_unclaimed?(issue.id, state) and
+      dispatch_capacity_available?(issue, state, running)
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
+
+  defp issue_unclaimed?(
+         issue_id,
+         %State{claimed: claimed, completed: completed, running: running, running_claims: running_claims, blocked: blocked}
+       ) do
+    !MapSet.member?(claimed, issue_id) and
+      !MapSet.member?(completed, issue_id) and
+      !Map.has_key?(running, issue_id) and
+      !Map.has_key?(running_claims, issue_id) and
+      !Map.has_key?(blocked, issue_id)
+  end
+
+  defp dispatch_capacity_available?(issue, state, running) do
+    available_slots(state) > 0 and
+      state_slots_available?(issue, running) and
+      worker_slots_available?(state)
+  end
 
   defp state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
     limit = Config.max_concurrent_agents_for_state(issue_state)

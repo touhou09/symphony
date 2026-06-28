@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   import Ecto.Changeset
 
+  alias SymphonyElixir.Codex.AuthPreflight
   alias SymphonyElixir.PathSafety
 
   @primary_key false
@@ -557,7 +558,7 @@ defmodule SymphonyElixir.Config.Schema do
         auth_json_path:
           resolve_path_value(
             settings.codex.auth_json_path,
-            SymphonyElixir.Codex.AuthPreflight.default_auth_path()
+            AuthPreflight.default_auth_path()
           )
     }
 

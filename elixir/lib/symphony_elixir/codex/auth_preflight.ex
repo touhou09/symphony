@@ -113,22 +113,30 @@ defmodule SymphonyElixir.Codex.AuthPreflight do
   defp check_last_refresh(auth, max_age_ms) do
     case Map.get(auth, "last_refresh") do
       value when is_binary(value) ->
-        case DateTime.from_iso8601(value) do
-          {:ok, timestamp, _offset} ->
-            age_ms = DateTime.diff(DateTime.utc_now(), timestamp, :millisecond)
-
-            if age_ms > max_age_ms do
-              {:error, "codex authentication preflight failed: auth refresh is stale; last_refresh=#{value} age_ms=#{age_ms} max_age_ms=#{max_age_ms}"}
-            else
-              :ok
-            end
-
-          {:error, _reason} ->
-            {:error, "codex authentication preflight failed: auth last_refresh is not a valid timestamp"}
-        end
+        check_last_refresh_timestamp(value, max_age_ms)
 
       _ ->
         {:error, "codex authentication preflight failed: auth last_refresh is missing"}
+    end
+  end
+
+  defp check_last_refresh_timestamp(value, max_age_ms) do
+    case DateTime.from_iso8601(value) do
+      {:ok, timestamp, _offset} ->
+        validate_last_refresh_age(value, timestamp, max_age_ms)
+
+      {:error, _reason} ->
+        {:error, "codex authentication preflight failed: auth last_refresh is not a valid timestamp"}
+    end
+  end
+
+  defp validate_last_refresh_age(value, timestamp, max_age_ms) do
+    age_ms = DateTime.diff(DateTime.utc_now(), timestamp, :millisecond)
+
+    if age_ms > max_age_ms do
+      {:error, "codex authentication preflight failed: auth refresh is stale; last_refresh=#{value} age_ms=#{age_ms} max_age_ms=#{max_age_ms}"}
+    else
+      :ok
     end
   end
 

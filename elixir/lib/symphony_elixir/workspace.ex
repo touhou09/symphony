@@ -211,7 +211,8 @@ defmodule SymphonyElixir.Workspace do
     run_after_complete_hook_result(workspace, issue_or_identifier, nil)
   end
 
-  @spec run_after_complete_hook_result(Path.t() | nil, map() | String.t() | nil, worker_host()) :: :ok | {:error, term()}
+  @spec run_after_complete_hook_result(Path.t() | nil, map() | String.t() | nil, worker_host()) ::
+          :ok | {:error, term()}
   def run_after_complete_hook_result(workspace, issue_or_identifier, worker_host) when is_binary(workspace) do
     issue_context = issue_context(issue_or_identifier)
     hooks = Config.settings!().hooks

@@ -50,22 +50,29 @@ defmodule Mix.Tasks.Workspace.PublishPr do
     commit_message = opts[:commit_message] || title
     body = opts[:body] || default_body(branch)
 
-    cond do
-      branch == base ->
-        Mix.raise("Refusing to publish PR from base branch #{branch}; create a ticket branch before handoff")
+    validate_publish_branch!(branch, base)
 
-      frozen_green_evidence_handoff?(repo, branch) ->
-        Mix.shell().info("PR already green for current HEAD; leaving evidence-only changes uncommitted for handoff")
+    if frozen_green_evidence_handoff?(repo, branch) do
+      Mix.shell().info("PR already green for current HEAD; leaving evidence-only changes uncommitted for handoff")
+    else
+      publish_branch!(repo, base, branch, title, commit_message, body)
+    end
+  end
 
-      true ->
-        ensure_git_identity!()
-        maybe_commit_changes!(commit_message)
-        push_branch!(branch)
+  defp validate_publish_branch!(branch, base) do
+    if branch == base do
+      Mix.raise("Refusing to publish PR from base branch #{branch}; create a ticket branch before handoff")
+    end
+  end
 
-        case open_pull_request_url(repo, branch) do
-          nil -> create_pull_request!(repo, base, branch, title, body)
-          url -> Mix.shell().info("PR already exists for #{branch}: #{url}")
-        end
+  defp publish_branch!(repo, base, branch, title, commit_message, body) do
+    ensure_git_identity!()
+    maybe_commit_changes!(commit_message)
+    push_branch!(branch)
+
+    case open_pull_request_url(repo, branch) do
+      nil -> create_pull_request!(repo, base, branch, title, body)
+      url -> Mix.shell().info("PR already exists for #{branch}: #{url}")
     end
   end
 
