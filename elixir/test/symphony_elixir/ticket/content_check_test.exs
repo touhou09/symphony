@@ -88,4 +88,95 @@ defmodule SymphonyElixir.Ticket.ContentCheckTest do
     assert ContentCheck.enabled?(required_sections: ["Background"])
     assert ContentCheck.enabled?(require_validation_checkboxes: true)
   end
+
+  test "accepts long valid bodies under a bounded validation time" do
+    long_ticket = long_ticket(with_validation_checklist: true)
+
+    {elapsed, status} =
+      :timer.tc(fn ->
+        ContentCheck.validate(long_ticket,
+          required_sections: ContentCheck.default_required_sections(),
+          require_acceptance_checkboxes: true,
+          require_validation_checkboxes: true
+        )
+      end)
+
+    assert status == :ok
+    assert elapsed <= 2_000_000
+  end
+
+  test "flags long malformed bodies with clear errors under a bounded time" do
+    malformed = long_ticket(with_validation_checklist: false)
+
+    {elapsed, {:error, errors}} =
+      :timer.tc(fn ->
+        ContentCheck.validate(malformed,
+          required_sections: ContentCheck.default_required_sections(),
+          require_acceptance_checkboxes: true,
+          require_validation_checkboxes: true
+        )
+      end)
+
+    assert elapsed <= 2_000_000
+    assert errors == ["section ## Validation must include checklist items"]
+  end
+
+  test "does not regress on long malformed body runtime" do
+    malformed = long_ticket(with_validation_checklist: false)
+
+    {elapsed, status} =
+      :timer.tc(fn ->
+        assert {:error, _} =
+                 ContentCheck.validate(malformed,
+                   required_sections: ContentCheck.default_required_sections(),
+                   require_acceptance_checkboxes: true,
+                   require_validation_checkboxes: true
+                 )
+      end)
+
+    assert elapsed <= 2_000_000
+    assert {:error, _} = status
+  end
+
+  test "rejects invalid validation timeout configuration" do
+    assert {:error, ["validation_timeout_ms must be a positive integer"]} =
+             ContentCheck.validate(@valid_ticket,
+               required_sections: ContentCheck.default_required_sections(),
+               validation_timeout_ms: 0
+             )
+
+    assert {:error, ["validation_timeout_ms must be a positive integer"]} =
+             ContentCheck.validate(@valid_ticket,
+               required_sections: ContentCheck.default_required_sections(),
+               validation_timeout_ms: 1.5
+             )
+  end
+
+  defp long_ticket(opts) do
+    payload = Keyword.get(opts, :payload, String.duplicate("x", 90_000))
+
+    validation_section =
+      if opts[:with_validation_checklist] do
+        "## Validation\n\n- [ ] Run parser stability check.\n"
+      else
+        "## Validation\n\nParser stability check needs prose only.\n"
+      end
+
+    """
+    ## Background
+
+    #{payload}
+
+    ## Scope
+
+    - Stress parser and section extraction with long, sanitized bodies.
+
+    ## Acceptance Criteria
+
+    - [ ] long bodies validate quickly.
+    - [ ] malformed long bodies fail with actionable errors.
+
+    #{validation_section}
+    """
+  end
 end

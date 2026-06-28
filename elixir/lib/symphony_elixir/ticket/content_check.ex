@@ -49,16 +49,39 @@ defmodule SymphonyElixir.Ticket.ContentCheck do
     required_sections = normalize_required_sections(Keyword.get(opts, :required_sections, []))
     require_acceptance_checkboxes = Keyword.get(opts, :require_acceptance_checkboxes, false)
     require_validation_checkboxes = Keyword.get(opts, :require_validation_checkboxes, false)
+    timeout_ms = Keyword.get(opts, :validation_timeout_ms, 2_000)
 
-    errors =
-      []
-      |> require_description(description)
-      |> require_sections(description, required_sections)
-      |> require_checkboxes(description, "Acceptance Criteria", require_acceptance_checkboxes)
-      |> require_checkboxes(description, "Validation", require_validation_checkboxes)
-      |> Enum.reverse()
+    if !is_integer(timeout_ms) or timeout_ms <= 0 do
+      {:error, ["validation_timeout_ms must be a positive integer"]}
+    else
+      sections = parse_sections(description)
 
-    if errors == [], do: :ok, else: {:error, errors}
+      task =
+        Task.async(fn ->
+          []
+          |> require_description(description)
+          |> require_sections(sections, required_sections)
+          |> require_checkboxes(sections, "Acceptance Criteria", require_acceptance_checkboxes)
+          |> require_checkboxes(sections, "Validation", require_validation_checkboxes)
+          |> Enum.reverse()
+        end)
+
+      errors =
+        case Task.yield(task, timeout_ms) do
+          nil ->
+            Task.shutdown(task, :brutal_kill)
+            ["ticket validation timed out after #{timeout_ms}ms"]
+
+          {:exit, _} ->
+            Task.shutdown(task, :brutal_kill)
+            ["ticket validation raised an unexpected error"]
+
+          {:ok, validation_errors} ->
+            validation_errors
+        end
+
+      if errors == [], do: :ok, else: {:error, errors}
+    end
   end
 
   @doc """
@@ -102,9 +125,7 @@ defmodule SymphonyElixir.Ticket.ContentCheck do
     if blank?(description), do: ["ticket description is required" | errors], else: errors
   end
 
-  defp require_sections(errors, description, required_sections) do
-    sections = parse_sections(description)
-
+  defp require_sections(errors, sections, required_sections) do
     Enum.reduce(required_sections, errors, fn section, acc ->
       case section_body(sections, section) do
         nil -> ["missing section ## #{section}" | acc]
@@ -114,11 +135,9 @@ defmodule SymphonyElixir.Ticket.ContentCheck do
     end)
   end
 
-  defp require_checkboxes(errors, _description, _section, false), do: errors
+  defp require_checkboxes(errors, _sections, _section, false), do: errors
 
-  defp require_checkboxes(errors, description, section, true) do
-    sections = parse_sections(description)
-
+  defp require_checkboxes(errors, sections, section, true) do
     case section_body(sections, section) do
       nil -> add_missing_section_error(errors, section)
       body -> if checklist_items?(body), do: errors, else: ["section ## #{section} must include checklist items" | errors]
@@ -140,36 +159,38 @@ defmodule SymphonyElixir.Ticket.ContentCheck do
     if error in errors, do: errors, else: [error | errors]
   end
 
+  @heading_matcher ~r/^\s{0,3}(\#{1,6})\s+(.+?)\s*#*\s*$/
+
   defp parse_sections(description) when is_binary(description) do
-    matches = Regex.scan(~r/^\s{0,3}(\#{1,6})\s+(.+?)\s*#*\s*$/m, description, return: :index)
+    lines = String.split(description, "\n", trim: false)
 
-    matches
-    |> Enum.with_index()
-    |> Enum.reduce(%{}, fn {match, index}, acc ->
-      [{heading_start, _heading_len}, _level, {title_start, title_len}] = match
-      title = binary_part(description, title_start, title_len) |> clean_heading_title()
-      canonical = canonical_section(title)
-      next_heading_start = next_heading_start(matches, index, byte_size(description))
-      body_start = heading_line_end(description, heading_start)
-      body = binary_part(description, body_start, next_heading_start - body_start) |> String.trim()
+    {current, sections, buffer} =
+      Enum.reduce(lines, {nil, %{}, []}, fn line, {current_canonical, sections, buffer} ->
+        case heading_match(line) do
+          nil ->
+            {current_canonical, sections, [line | buffer]}
 
-      Map.put_new(acc, canonical, body)
-    end)
+          canonical ->
+            sections = store_section_body(sections, current_canonical, buffer)
+            {canonical, sections, []}
+        end
+      end)
+
+    store_section_body(sections, current, buffer)
   end
 
   defp parse_sections(_description), do: %{}
 
-  defp next_heading_start(matches, index, default_start) do
-    case Enum.at(matches, index + 1) do
-      [{start, _len} | _rest] -> start
-      _ -> default_start
-    end
+  defp store_section_body(sections, nil, _buffer), do: sections
+
+  defp store_section_body(sections, canonical, buffer) do
+    Map.put_new(sections, canonical, Enum.reverse(buffer) |> Enum.join("\n") |> String.trim())
   end
 
-  defp heading_line_end(description, heading_start) do
-    case :binary.match(description, "\n", scope: {heading_start, byte_size(description) - heading_start}) do
-      {newline_at, 1} -> newline_at + 1
-      :nomatch -> byte_size(description)
+  defp heading_match(line) do
+    case Regex.run(@heading_matcher, line) do
+      [_, _hashes, title] -> canonical_section(clean_heading_title(title))
+      _ -> nil
     end
   end
 
