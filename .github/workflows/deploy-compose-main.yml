@@ -15,37 +15,19 @@ jobs:
   deploy-orchestrator:
     if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.confirm_deploy == 'I_APPROVE_DEPLOY' }}
     environment: symphony-compose
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, symphony-compose-deploy]
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Validate deploy secrets and inputs
+      - name: Validate deploy target and inputs
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_TARGET_PATH: ${{ secrets.DEPLOY_TARGET_PATH }}
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_SSH_PORT: ${{ vars.DEPLOY_SSH_PORT }}
         run: |
           set -eu
-          missing=()
 
-          if [ -z "${DEPLOY_HOST}" ]; then
-            missing+=("DEPLOY_HOST")
-          fi
-          if [ -z "${DEPLOY_USER}" ]; then
-            missing+=("DEPLOY_USER")
-          fi
           if [ -z "${DEPLOY_TARGET_PATH}" ]; then
-            missing+=("DEPLOY_TARGET_PATH")
-          fi
-          if [ -z "${DEPLOY_SSH_KEY}" ]; then
-            missing+=("DEPLOY_SSH_KEY")
-          fi
-
-          if [ "${#missing[@]}" -ne 0 ]; then
-            printf 'Missing required deploy secrets: %s\n' "${missing[*]}"
+            echo "Missing required deploy secret: DEPLOY_TARGET_PATH"
             exit 1
           fi
 
@@ -54,41 +36,40 @@ jobs:
             exit 1
           fi
 
-      - name: Configure SSH for deploy host
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+          if [ ! -d "${DEPLOY_TARGET_PATH}/.git" ]; then
+            echo "Deployment path missing a git checkout: ${DEPLOY_TARGET_PATH}"
+            exit 1
+          fi
 
-      - name: Add deploy host key
+      - name: Update local runtime from main and deploy orchestrator only
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_SSH_PORT: ${{ vars.DEPLOY_SSH_PORT }}
-        run: |
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          port="${DEPLOY_SSH_PORT:-22}"
-          ssh-keyscan -p "${port}" "${DEPLOY_HOST}" >> ~/.ssh/known_hosts
-
-      - name: Update runtime from main and deploy orchestrator only
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_TARGET_PATH: ${{ secrets.DEPLOY_TARGET_PATH }}
-          DEPLOY_SSH_PORT: ${{ vars.DEPLOY_SSH_PORT }}
+          DOCKER_HOST: unix:///Users/yuseungju/.colima/default/docker.sock
+          PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
         run: |
-          port="${DEPLOY_SSH_PORT:-22}"
-          ssh -o BatchMode=yes -p "${port}" "${DEPLOY_USER}@${DEPLOY_HOST}" <<SSH
-            set -eu
-            target_path="${DEPLOY_TARGET_PATH}"
+          set -eu
 
-            if [ ! -d "${target_path}/.git" ]; then
-              echo "Deployment path missing a git checkout: ${target_path}"
-              exit 1
+          if ! /opt/homebrew/bin/colima status >/dev/null 2>&1; then
+            /opt/homebrew/bin/colima start
+          fi
+
+          docker_ready=0
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+            if /usr/local/bin/docker version >/dev/null 2>&1; then
+              docker_ready=1
+              break
             fi
+            sleep 2
+          done
 
-            cd "${target_path}"
-            git fetch --prune origin
-            git checkout main
-            git reset --hard origin/main
-            docker compose up -d --build --no-deps orchestrator
-          SSH
+          if [ "${docker_ready}" -ne 1 ]; then
+            echo "Docker socket unavailable after waiting for Colima"
+            exit 1
+          fi
+
+          cd "${DEPLOY_TARGET_PATH}"
+          git fetch --prune origin
+          git checkout main
+          git reset --hard origin/main
+          /usr/local/bin/docker compose up -d --build --no-deps orchestrator
+          /usr/local/bin/docker compose ps orchestrator
