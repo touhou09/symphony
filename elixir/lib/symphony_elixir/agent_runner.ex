@@ -400,8 +400,12 @@ defmodule SymphonyElixir.AgentRunner do
 
     case EvidenceCheck.validate_file(evidence_path, Config.squad_prompt_context()) do
       :ok -> :ok
-      {:error, errors} -> {:error, {:squad_evidence_failed, errors}}
+      {:error, errors} -> {:error, {:runtime_blocker, squad_evidence_blocker_message(errors)}}
     end
+  end
+
+  defp squad_evidence_blocker_message(errors) when is_list(errors) do
+    "squad evidence contract failed: " <> Enum.join(errors, "; ")
   end
 
   defp codex_command_for_model(command, model) when is_binary(command) and is_binary(model) do
