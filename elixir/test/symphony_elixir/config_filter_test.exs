@@ -65,6 +65,46 @@ defmodule SymphonyElixir.ConfigFilterTest do
     end
   end
 
+  test "config filter excludes runtime auth and caches from workspace git status" do
+    root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-config-filter-excludes-#{System.unique_integer([:positive])}")
+
+    workspace = Path.join(root, "workspace")
+    source_config = Path.join(root, "host-config.toml")
+    source_auth = Path.join(root, "host-auth.json")
+    safe_auth = Path.join([workspace, ".codex", "auth.json"])
+
+    try do
+      File.mkdir_p!(workspace)
+      assert {_output, 0} = System.cmd("git", ["-C", workspace, "init", "-q"], stderr_to_stdout: true)
+
+      File.write!(source_config, ~s(model = "gpt-5.5"\n))
+      File.write!(source_auth, ~s({"fake":"auth"}))
+      File.mkdir_p!(Path.join(workspace, ".hex"))
+      File.mkdir_p!(Path.join(workspace, ".mix"))
+      File.write!(Path.join([workspace, ".hex", "cache"]), "runtime cache")
+      File.write!(Path.join([workspace, ".mix", "archives"]), "runtime cache")
+
+      assert {:ok, _command} =
+               ConfigFilter.inject_sandbox_config("codex app-server", workspace,
+                 source_config_path: source_config,
+                 source_auth_path: source_auth
+               )
+
+      assert File.lstat!(safe_auth).type == :symlink
+
+      exclude = File.read!(Path.join([workspace, ".git", "info", "exclude"]))
+
+      for pattern <- [".codex/", ".hex/", ".mix/"] do
+        assert String.contains?(exclude, pattern)
+      end
+
+      assert {"", 0} = System.cmd("git", ["-C", workspace, "status", "--porcelain=v1", "-uall"], stderr_to_stdout: true)
+    after
+      File.rm_rf(root)
+    end
+  end
+
   test "config filter drops hooks.state table sections" do
     workspace =
       Path.join(System.tmp_dir!(), "symphony-elixir-config-filter-section-#{System.unique_integer([:positive])}")

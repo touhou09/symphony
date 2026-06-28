@@ -112,11 +112,17 @@
 - **Trap**: The deploy target was still on local `dev` with tracked worklog edits; workflow now resets tracked changes before switching to `main`.
 ---
 
-## 2026-06-28: Total token budget blocker [in-progress]
+## 2026-06-28: Total token budget blocker [done]
 - **What**: Added a configurable `codex.max_total_tokens` guard and set the Compose workflow default to 1,500,000 tokens per running issue.
 - **Why**: Live SYM-23 e2e proved auth was fixed but a diff-producing role could still climb past 6M tokens, bypassing the no-diff guard.
 - **Impact**: Future runaway issues stop as runtime blockers even when workspace diffs exist, preserving the Jira workpad evidence and active slot state.
-- **Test**: `mix format --check-formatted`, `mix test` targeted 54/54, total-limit test 1/1, `orchestrator_status_test` 51/51, `workspace_and_config_test` 53/53, `mix specs.check`, `mix dialyzer --format short`, and lib-only strict Credo passed.
+- **Test**: PR #24 and #25 checks passed; main deploy succeeded; live SYM-21 blocked at 1,510,078/1,500,000 tokens and SYM-23 blocked at 1,539,416/1,500,000 tokens with no retry observed.
 - **Trap**: Local strict Credo still crashes on existing test sigils under Elixir 1.20.1; CI uses Elixir 1.19.5 for the full check.
-- **Next**: Merge to dev/main, redeploy, and verify SYM-21/SYM-23 are blocked or resumed under the new budget.
+---
+
+## 2026-06-28: Workspace runtime file exclude [done]
+- **What**: Added workspace-local git excludes for Codex runtime home and Mix cache directories created during isolated HOME execution.
+- **Why**: Live SYM-23 left `.codex/auth.json`, sanitized config, and cache directories visible to `git status`, which could pollute `workspace.publish_pr` because it stages with `git add -A`.
+- **Impact**: Future Symphony workspaces can still use mounted Codex auth while publish hooks ignore runtime-only files and avoid committing auth symlinks or cache noise.
+- **Test**: `mix format --check-formatted`, config filter tests 5/5, publish PR tests 2/2, targeted strict Credo clean, `mix specs.check`, and `git diff --check` passed.
 ---
