@@ -1,0 +1,1 @@
+{"Target":"worker2","LocalPath":"/var/lib/symphony/workspaces/SYM-35/elixir/test/support/live_e2e_docker","DockerfilePath":"/var/lib/symphony/workspaces/SYM-35/elixir/test/support/live_e2e_docker/Dockerfile"}

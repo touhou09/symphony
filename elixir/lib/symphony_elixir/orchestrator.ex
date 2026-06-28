@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workflow, Workspace}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Ticket.ContentCheck
 
@@ -16,6 +16,9 @@ defmodule SymphonyElixir.Orchestrator do
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @runtime_blocker_marker "<!-- symphony-runtime-blocker:no-diff-token-limit -->"
+  @mcp_preflight_marker "<!-- symphony-mcp-preflight -->"
+  @default_codex_host_config_path "/run/symphony/codex-host/config.toml"
+  @cloudflare_mcp_name "cloudflare"
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -1341,7 +1344,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
 
   defp preflight_issue_for_dispatch(%Issue{} = issue) do
-    with :ok <- ticket_preflight_issue(issue), do: runtime_blocker_preflight(issue)
+    with :ok <- ticket_preflight_issue(issue),
+         :ok <- runtime_blocker_preflight(issue),
+         :ok <- mcp_preflight_issue(issue) do
+      :ok
+    end
   end
 
   defp ticket_preflight_issue(%Issue{} = issue) do
@@ -1380,6 +1387,324 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, {:runtime_blocker, "runtime blocker persisted on tracker workpad: no-diff token limit"}}
     else
       :ok
+    end
+  end
+
+  defp mcp_preflight_issue(%Issue{} = issue) do
+    case configured_mcp_preflight_results() do
+      {:ok, []} ->
+        :ok
+
+      {:ok, results} ->
+        blocking_failures = Enum.filter(results, &required_failure?/1)
+
+        warnings =
+          Enum.reject(results, fn result ->
+            (result.required && required_failure?(result)) or result.status_class == :ok
+          end)
+
+        :ok = post_optional_mcp_preflight_warning(issue, warnings)
+
+        if blocking_failures != [] do
+          failure_messages = Enum.map(blocking_failures, &mcp_failure_message/1)
+          {:error, {:runtime_blocker, Enum.join(failure_messages, " | ")}}
+        else
+          :ok
+        end
+    end
+  end
+
+  defp post_optional_mcp_preflight_warning(%Issue{id: issue_id}, warnings) when is_binary(issue_id) do
+    if warnings == [] do
+      :ok
+    else
+      warning_section = mcp_preflight_warning_body(warnings)
+
+      case Tracker.list_comments(issue_id) do
+        {:ok, comments} ->
+          case find_workpad_comment(comments) do
+            nil ->
+              Tracker.create_comment(issue_id, compose_mcp_preflight_workpad_body(warning_section))
+
+            workpad_comment ->
+              body = comment_body(workpad_comment)
+
+              if String.contains?(body, @mcp_preflight_marker) do
+                :ok
+              else
+                updated_body =
+                  String.trim_trailing(body) <> "\n\n" <> warning_section
+
+                case comment_id(workpad_comment) do
+                  nil -> Tracker.create_comment(issue_id, compose_mcp_preflight_workpad_body(warning_section))
+                  id -> Tracker.update_comment(issue_id, id, updated_body)
+                end
+              end
+          end
+
+        {:error, reason} ->
+          Logger.warning("Unable to list workpad comments for MCP preflight issue_id=#{issue_id}: #{inspect(reason)}")
+          Tracker.create_comment(issue_id, compose_mcp_preflight_workpad_body(warning_section))
+      end
+    end
+  end
+
+  defp post_optional_mcp_preflight_warning(%Issue{}, _warnings), do: :ok
+
+  defp mcp_preflight_warning_body(warnings) when is_list(warnings) do
+    lines =
+      warnings
+      |> Enum.map_join("\n", fn warning -> "- #{mcp_warning_line(warning)}" end)
+
+    """
+    #{@mcp_preflight_marker}
+    ### MCP Preflight (optional)
+
+    Optional MCP checks reported status for configured optional servers:
+
+    #{lines}
+
+    This ticket continues; MCP tool availability may be partially reduced.
+    """
+    |> String.trim()
+  end
+
+  defp compose_mcp_preflight_workpad_body(warning_section) do
+    """
+    ## Codex Workpad
+
+    #{warning_section}
+    """
+    |> String.trim()
+  end
+
+  defp required_failure?(%{required: true, status_class: status}) do
+    status in [:missing_token, :invalid_token, :insufficient_scope]
+  end
+
+  defp required_failure?(_result), do: false
+
+  defp mcp_warning_line(%{server: server, status_class: status_class}) do
+    "server=#{server} status=#{status_class} action=#{mcp_operator_action(server, status_class)}"
+  end
+
+  defp mcp_failure_message(%{server: server, status_class: status_class}) do
+    "server=#{server} status=#{status_class} action=#{mcp_operator_action(server, status_class)}"
+  end
+
+  defp mcp_operator_action(server, :missing_token), do: "configure #{format_server_name(server)} MCP credentials"
+  defp mcp_operator_action(server, :invalid_token), do: "rotate/replace #{format_server_name(server)} MCP token"
+  defp mcp_operator_action(server, :insufficient_scope), do: "add required #{format_server_name(server)} MCP scopes"
+  defp mcp_operator_action(_server, _), do: "review MCP configuration"
+
+  defp format_server_name(server) when is_binary(server) do
+    server
+    |> String.trim()
+    |> String.downcase()
+    |> String.capitalize()
+  end
+
+  defp format_server_name(_), do: "MCP"
+
+  defp configured_mcp_preflight_results do
+    explicit = symphony_mcp_preflight_config()
+    codex_servers = codex_mcp_servers()
+
+    cloudflare_entry = Map.get(explicit, @cloudflare_mcp_name)
+
+    cloudflare_configured =
+      is_map(cloudflare_entry) or
+        map_has_key?(codex_servers, @cloudflare_mcp_name)
+
+    if not cloudflare_configured do
+      {:ok, []}
+    else
+      result = [
+        %{
+          server: @cloudflare_mcp_name,
+          required: cloudflare_entry |> get_preflight_setting(:required, false),
+          status_class:
+            resolve_cloudflare_status(
+              cloudflare_entry,
+              token_env_refs_for(@cloudflare_mcp_name, codex_servers)
+            )
+        }
+      ]
+
+      {:ok, Enum.filter(result, &(&1.status_class != :ok))}
+    end
+  end
+
+  defp symphony_mcp_preflight_config do
+    case Workflow.current() do
+      {:ok, %{config: config}} when is_map(config) ->
+        config
+        |> Map.get("mcp_preflight", %{})
+        |> normalize_symphony_mcp_preflight_config()
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp normalize_symphony_mcp_preflight_config(config) when is_map(config) do
+    config
+    |> Enum.reduce(%{}, fn {server_name, server_config}, acc ->
+      server = String.downcase(to_string(server_name))
+
+      normalized =
+        if is_map(server_config) do
+          %{
+            required: get_preflight_setting(server_config, :required, true),
+            status: normalize_status(get_preflight_setting(server_config, :status, :ok))
+          }
+        else
+          %{required: true, status: :ok}
+        end
+
+      Map.put(acc, server, normalized)
+    end)
+  end
+
+  defp normalize_symphony_mcp_preflight_config(_config), do: %{}
+
+  defp normalize_status(:missing_token), do: :missing_token
+  defp normalize_status(:invalid_token), do: :invalid_token
+  defp normalize_status(:insufficient_scope), do: :insufficient_scope
+  defp normalize_status("missing_token"), do: :missing_token
+  defp normalize_status("invalid_token"), do: :invalid_token
+  defp normalize_status("insufficient_scope"), do: :insufficient_scope
+  defp normalize_status(:ok), do: :ok
+  defp normalize_status(_), do: :ok
+
+  defp resolve_cloudflare_status(server_entry, env_refs) do
+    status = normalize_status(get_preflight_setting(server_entry, :status, :ok))
+
+    cond do
+      status != :ok ->
+        status
+
+      get_preflight_setting(server_entry, :required, false) == true and env_refs == [] ->
+        :missing_token
+
+      true ->
+        resolve_cloudflare_env_status(env_refs)
+    end
+  end
+
+  defp resolve_cloudflare_env_status(env_refs) do
+    if env_refs != [] and Enum.any?(env_refs, fn token_name -> System.get_env(token_name) in [nil, ""] end),
+      do: :missing_token,
+      else: :ok
+  end
+
+  defp get_preflight_setting(server_entry, key, default) when is_map(server_entry) do
+    case Map.fetch(server_entry, key) do
+      {:ok, value} ->
+        value
+
+      :error ->
+        case Map.fetch(server_entry, to_string(key)) do
+          {:ok, value} -> value
+          :error -> default
+        end
+    end
+  end
+
+  defp get_preflight_setting(_server_entry, _key, default), do: default
+
+  defp map_has_key?(map, key) when is_map(map), do: Map.has_key?(map, key)
+  defp map_has_key?(_map, _key), do: false
+
+  defp codex_mcp_servers do
+    case read_codex_host_config() do
+      {:ok, config_contents} ->
+        codex_server_entries(config_contents)
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp read_codex_host_config do
+    path = Application.get_env(:symphony_elixir, :codex_host_config_path, @default_codex_host_config_path)
+
+    case File.read(path) do
+      {:ok, contents} -> {:ok, contents}
+      _ -> :error
+    end
+  end
+
+  defp codex_server_entries(contents) when is_binary(contents) do
+    lines = String.split(contents, ["\r\n", "\n", "\r"], trim: true)
+
+    {_state, server_entries} =
+      Enum.reduce(lines, {:none, %{}}, fn line, {current, entries} ->
+        trimmed = String.trim(line)
+
+        cond do
+          match = section_header_server(trimmed) ->
+            {match, entries}
+
+          current == :none ->
+            {current, entries}
+
+          String.starts_with?(trimmed, "name") ->
+            case parse_toml_name_assignment(trimmed) do
+              nil -> {current, entries}
+              server_name -> {server_name, Map.put_new(entries, server_name, MapSet.new())}
+            end
+
+          env_refs = parse_toml_env_refs(trimmed) ->
+            env_set =
+              entries
+              |> Map.get(current, MapSet.new())
+              |> MapSet.union(MapSet.new(env_refs))
+
+            {current, Map.put(entries, current, env_set)}
+
+          true ->
+            {current, entries}
+        end
+      end)
+
+    server_entries
+  end
+
+  defp section_header_server(line) do
+    if line == "[mcp_servers]" || line == "[[mcp_servers]]" do
+      :inline
+    else
+      captures =
+        Regex.run(~r/^\[\[?mcp_servers\.([^\]]+)\]\]?$/, line)
+
+      case captures do
+        [_, raw_name] -> String.downcase(raw_name)
+        _ -> nil
+      end
+    end
+  end
+
+  defp parse_toml_name_assignment(line) when is_binary(line) do
+    captures = Regex.run(~r/^name\s*=\s*\"?([a-zA-Z0-9_-]+)\"?$/, line)
+
+    case captures do
+      [_, server] -> String.downcase(server)
+      _ -> nil
+    end
+  end
+
+  defp parse_toml_env_refs(line) when is_binary(line) do
+    Regex.scan(~r/\$\{([A-Z0-9_]+)\}/, line, capture: :all_but_first)
+    |> List.flatten()
+  end
+
+  defp token_env_refs_for(server, codex_servers) when is_binary(server) do
+    case Map.get(codex_servers, server) do
+      nil -> []
+      env_refs when is_struct(env_refs, MapSet) -> MapSet.to_list(env_refs)
+      env_refs when is_list(env_refs) -> env_refs
+      _ -> []
     end
   end
 
