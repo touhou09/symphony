@@ -887,6 +887,39 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "after_complete hook failure is logged with status" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-after-complete-fail-log-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace_name = "MT-HOOKS-LOG"
+
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_complete: "printf 'no-mix' && exit 17"
+      )
+
+      assert {:ok, workspace} = Workspace.create_for_issue(workspace_name)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert :ok = Workspace.run_after_complete_hook(workspace, workspace_name)
+        end)
+
+      assert log =~ "Workspace hook failed hook=after_complete"
+      assert log =~ "status=17"
+      assert log =~ "no-mix"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace remove continues when before_remove hook fails" do
     test_root =
       Path.join(
@@ -907,6 +940,39 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert {:ok, workspace} = Workspace.create_for_issue("MT-HOOKS-FAIL")
       assert :ok = Workspace.remove_issue_workspaces("MT-HOOKS-FAIL")
       refute File.exists?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "before_remove hook failure is logged with status" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-before-remove-fail-log-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace_name = "MT-HOOKS-LOG-REMOVE"
+
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_before_remove: "printf 'cleanup-failed' && exit 17"
+      )
+
+      assert {:ok, _workspace} = Workspace.create_for_issue(workspace_name)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert :ok = Workspace.remove_issue_workspaces(workspace_name)
+        end)
+
+      assert log =~ "Workspace hook failed hook=before_remove"
+      assert log =~ "status=17"
+      assert log =~ "cleanup-failed"
     after
       File.rm_rf(test_root)
     end
