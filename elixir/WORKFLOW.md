@@ -67,6 +67,7 @@ hooks:
     cd elixir && mix workspace.before_remove
 agent:
   max_concurrent_agents: 10
+  max_active_issues: 3
   max_turns: 20
   squad_enabled: true
   model_roles:

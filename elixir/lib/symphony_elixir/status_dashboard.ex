@@ -334,12 +334,14 @@ defmodule SymphonyElixir.StatusDashboard do
     case snapshot_data do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
         rate_limits = Map.get(snapshot, :rate_limits)
+        dispatch = Map.get(snapshot, :dispatch, %{})
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
         codex_input_tokens = Map.get(codex_totals, :input_tokens, 0)
         codex_output_tokens = Map.get(codex_totals, :output_tokens, 0)
         codex_total_tokens = Map.get(codex_totals, :total_tokens, 0)
         codex_seconds_running = Map.get(codex_totals, :seconds_running, 0)
+        dispatch_lines = format_dispatch_lines(dispatch)
         agent_count = length(running)
         max_agents = Config.settings!().agent.max_concurrent_agents
         running_event_width = running_event_width(terminal_columns_override)
@@ -365,6 +367,7 @@ defmodule SymphonyElixir.StatusDashboard do
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
            project_link_lines,
            project_refresh_line,
+           dispatch_lines,
            colorize("├─ Running", @ansi_bold),
            "│",
            running_table_header_row(running_event_width),
@@ -425,6 +428,43 @@ defmodule SymphonyElixir.StatusDashboard do
   defp format_project_refresh_line(_) do
     colorize("│ Next refresh: ", @ansi_bold) <> colorize("n/a", @ansi_gray)
   end
+
+  defp format_dispatch_lines(%{} = dispatch) do
+    if dispatch == %{} do
+      []
+    else
+      [
+        format_dispatch_line(dispatch),
+        format_dispatch_queue_line(Map.get(dispatch, :queued, []))
+      ]
+    end
+  end
+
+  defp format_dispatch_lines(_dispatch), do: []
+
+  defp format_dispatch_line(%{} = dispatch) do
+    active_issue_slots = Map.get(dispatch, :active_issue_slots, "n/a")
+    queued_count = Map.get(dispatch, :queued_count, 0)
+    max_active_issues = Map.get(dispatch, :max_active_issues, "?")
+
+    colorize("│ Dispatch: ", @ansi_bold) <>
+      colorize("limit #{max_active_issues}", @ansi_gray) <>
+      colorize(" active ", @ansi_green) <>
+      colorize("#{active_issue_slots}", @ansi_orange) <>
+      colorize("/", @ansi_gray) <>
+      colorize("queued #{queued_count}", @ansi_gray)
+  end
+
+  defp format_dispatch_queue_line([]), do: []
+
+  defp format_dispatch_queue_line(queued) when is_list(queued) and queued != [] do
+    top_queued = Enum.take(queued, 3)
+
+    colorize("│ Dispatch queue: ", @ansi_bold) <>
+      colorize(Enum.join(top_queued, ", "), @ansi_cyan)
+  end
+
+  defp format_dispatch_queue_line(_queued), do: []
 
   defp tracker_project_url(%{tracker: %{kind: "jira", endpoint: endpoint, project_slug: project_slug}})
        when is_binary(endpoint) and is_binary(project_slug) and project_slug != "" do

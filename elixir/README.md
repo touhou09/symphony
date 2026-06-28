@@ -202,6 +202,7 @@ hooks:
     git clone git@github.com:your-org/your-repo.git .
 agent:
   max_concurrent_agents: 10
+  max_active_issues: 3
   max_turns: 20
 codex:
   command: codex app-server
@@ -230,6 +231,8 @@ Notes:
 - Workflows that run package managers or other commands that resolve external hosts should set
   `networkAccess: true` in `codex.turn_sandbox_policy`; otherwise DNS/network access may be denied
   by the Codex turn sandbox.
+- `agent.max_active_issues` caps how many Jira candidates can be active or queued for dispatch at once.
+  Default: `3`.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - `agent.squad_enabled` switches execution from the legacy single-session loop to sequential
