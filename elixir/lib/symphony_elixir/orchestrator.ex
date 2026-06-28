@@ -1466,7 +1466,7 @@ defmodule SymphonyElixir.Orchestrator do
     #{@runtime_blocker_marker}
     ### Runtime Blocker
 
-    - Type: no-diff token limit
+    - Type: #{runtime_blocker_type(error)}
     - Error: #{error}
     - Tokens: #{tokens}
     - Workspace: #{workspace}
@@ -1474,6 +1474,16 @@ defmodule SymphonyElixir.Orchestrator do
     """
     |> String.trim()
   end
+
+  defp runtime_blocker_type(error) when is_binary(error) do
+    cond do
+      String.contains?(error, "squad evidence contract failed") -> "squad evidence contract"
+      String.contains?(error, "no-diff token limit") -> "no-diff token limit"
+      true -> "runtime blocker"
+    end
+  end
+
+  defp runtime_blocker_type(_error), do: "runtime blocker"
 
   defp comment_body(%{"body" => body}) when is_binary(body), do: body
   defp comment_body(%{body: body}) when is_binary(body), do: body
