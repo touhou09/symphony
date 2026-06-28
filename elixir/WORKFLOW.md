@@ -9,10 +9,6 @@ tracker:
     - "\uC9C0\uC6D0 \uB300\uAE30 \uC911"
     - "\uC9C4\uD589 \uC911"
     - "Work in progress"
-    - Pending
-    - "\uACE0\uAC1D \uB300\uAE30 \uC911"
-    - Escalated
-    - "Waiting for approval"
   terminal_states:
     - "\uC644\uB8CC"
     - "\uC644\uB8CC\uB428"
@@ -25,10 +21,6 @@ tracker:
     - "10073"
     - "3"
     - "10076"
-    - "10077"
-    - "10075"
-    - "10079"
-    - "10078"
   terminal_status_ids:
     - "10072"
     - "10071"
@@ -169,7 +161,8 @@ The agent should use the issue context supplied by Symphony and the configured t
 ## SYM Jira Status Map
 
 - `미해결`, `다시 열림`, `지원 대기 중` -> queued or active intake. Move to `진행 중` before implementation when that transition is available.
-- `진행 중`, `Work in progress`, `Pending`, `고객 대기 중`, `Escalated`, `Waiting for approval` -> active work or waiting state. Continue only when the ticket still has actionable implementation or verification work.
+- `진행 중`, `Work in progress` -> active work. Continue execution while the ticket still has actionable implementation or verification work.
+- `Pending`, `고객 대기 중`, `Escalated`, `Waiting for approval` -> paused or waiting states. Do not start or continue automated execution until a human moves the ticket back to an active intake or active work state.
 - `완료`, `완료됨`, `종료`, `해결됨` -> successful terminal states. Do not dispatch or modify.
 - `취소` -> canceled terminal state. Use only for explicitly canceled work or smoke cleanup, never for successful implementation handoff.
 - For successful completion, prefer `해결됨` or `완료` when both success and cancel transitions are available.
@@ -180,7 +173,8 @@ The agent should use the issue context supplied by Symphony and the configured t
 2. Read the current state.
 3. Route to the matching flow:
    - Active intake states (`미해결`, `다시 열림`, `지원 대기 중`) -> move to `진행 중` when available, ensure bootstrap workpad comment exists, then start execution flow.
-   - Active work states (`진행 중`, `Work in progress`, `Pending`, `고객 대기 중`, `Escalated`, `Waiting for approval`) -> continue execution flow from the current workpad.
+   - Active work states (`진행 중`, `Work in progress`) -> continue execution flow from the current workpad.
+   - Paused or waiting states (`Pending`, `고객 대기 중`, `Escalated`, `Waiting for approval`) -> do nothing and shut down without consuming an execution slot.
    - Successful terminal states (`완료`, `완료됨`, `종료`, `해결됨`) -> do nothing and shut down.
    - `취소` -> do nothing and shut down as canceled work.
 4. Check whether a PR already exists for the current branch and whether it is closed.
