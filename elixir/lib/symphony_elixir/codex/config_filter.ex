@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Codex.ConfigFilter do
   @safe_auth_subpath [".codex", "auth.json"]
   @host_config_path "/run/symphony/codex-host/config.toml"
   @host_auth_path "/root/.codex/auth.json"
-  @workspace_runtime_excludes [".codex/", ".hex/", ".mix/"]
+  @workspace_runtime_excludes [".codex/", ".hex/", ".mix/", ".cache/", ".docker/"]
 
   @spec inject_sandbox_config(String.t(), Path.t(), keyword()) ::
           {:ok, String.t()} | {:error, term()}
@@ -40,7 +40,8 @@ defmodule SymphonyElixir.Codex.ConfigFilter do
     end
   end
 
-  defp ensure_workspace_runtime_excludes(workspace) when is_binary(workspace) do
+  @spec ensure_workspace_runtime_excludes(Path.t()) :: :ok | {:error, term()}
+  def ensure_workspace_runtime_excludes(workspace) when is_binary(workspace) do
     case git_exclude_path(workspace) do
       {:ok, exclude_path} ->
         with :ok <- File.mkdir_p(Path.dirname(exclude_path)),

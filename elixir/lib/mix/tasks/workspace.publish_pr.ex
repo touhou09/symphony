@@ -1,6 +1,8 @@
 defmodule Mix.Tasks.Workspace.PublishPr do
   use Mix.Task
 
+  alias SymphonyElixir.Codex.ConfigFilter
+
   @shortdoc "Commit, push, and open a GitHub PR for the current workspace branch"
 
   @moduledoc """
@@ -67,6 +69,7 @@ defmodule Mix.Tasks.Workspace.PublishPr do
 
   defp publish_branch!(repo, base, branch, title, commit_message, body) do
     ensure_git_identity!()
+    ensure_runtime_excludes!()
     maybe_commit_changes!(commit_message)
     push_branch!(branch)
 
@@ -134,6 +137,13 @@ defmodule Mix.Tasks.Workspace.PublishPr do
   defp ensure_git_identity! do
     ensure_git_config!("user.name", "Symphony Bot")
     ensure_git_config!("user.email", "symphony@example.invalid")
+  end
+
+  defp ensure_runtime_excludes! do
+    case ConfigFilter.ensure_workspace_runtime_excludes(File.cwd!()) do
+      :ok -> :ok
+      {:error, reason} -> Mix.raise("Unable to update workspace runtime excludes: #{inspect(reason)}")
+    end
   end
 
   defp ensure_git_config!(key, fallback) do

@@ -104,6 +104,12 @@ defmodule Mix.Tasks.Workspace.PublishPrTest do
           end)
 
           log = File.read!(log_path)
+          exclude = File.read!(System.fetch_env!("FAKE_GIT_EXCLUDE"))
+
+          for pattern <- [".codex/", ".hex/", ".mix/", ".cache/", ".docker/"] do
+            assert String.contains?(exclude, pattern)
+          end
+
           assert log =~ "git add -A"
           assert log =~ "git commit -m Complete sym-13-no-diff-guard"
           assert log =~ "git push -u origin sym-13-no-diff-guard"
@@ -117,6 +123,7 @@ defmodule Mix.Tasks.Workspace.PublishPrTest do
     root = Path.join(System.tmp_dir!(), "workspace-publish-pr-task-test-#{unique}")
     bin_dir = Path.join(root, "bin")
     log_path = Path.join(root, "commands.log")
+    exclude_path = Path.join([root, "git-info", "exclude"])
 
     try do
       File.rm_rf!(root)
@@ -131,6 +138,7 @@ defmodule Mix.Tasks.Workspace.PublishPrTest do
       with_env(
         %{
           "COMMAND_LOG" => log_path,
+          "FAKE_GIT_EXCLUDE" => exclude_path,
           "PATH" => Enum.join([bin_dir, original_path], ":")
         },
         fn -> fun.(log_path) end
@@ -149,6 +157,11 @@ defmodule Mix.Tasks.Workspace.PublishPrTest do
     """
     #!/bin/sh
     printf 'git %s\\n' "$*" >> "$COMMAND_LOG"
+
+    if [ "$1" = "-C" ] && [ "$3" = "rev-parse" ] && [ "$4" = "--git-path" ]; then
+      printf '%s\\n' "$FAKE_GIT_EXCLUDE"
+      exit 0
+    fi
 
     if [ "$1" = "branch" ] && [ "$2" = "--show-current" ]; then
       if [ -n "$FAKE_GIT_BRANCH" ]; then
