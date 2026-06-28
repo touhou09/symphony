@@ -152,6 +152,9 @@ defmodule SymphonyElixir.AgentRunner do
       {:ok, session} ->
         run_started_squad_role(session, role_context, pre_state, workspace, issue, recipient)
 
+      {:error, {:runtime_blocker, _reason} = reason} ->
+        {:halt, {:error, reason}}
+
       {:error, reason} ->
         {:halt, {:error, {:squad_role_start_failed, role, reason}}}
     end
@@ -186,7 +189,10 @@ defmodule SymphonyElixir.AgentRunner do
   defp handle_squad_role_result({:error, reason}, role_context, _pre_state, _workspace, _issue) do
     {role, _model, _role_number, _total_roles, _prompt} = role_context
 
-    {:halt, {:error, {:squad_role_failed, role, reason}}}
+    case reason do
+      {:runtime_blocker, _message} -> {:halt, {:error, reason}}
+      _ -> {:halt, {:error, {:squad_role_failed, role, reason}}}
+    end
   end
 
   defp role_pre_change_state("implementer", workspace), do: workspace_change_state(workspace)

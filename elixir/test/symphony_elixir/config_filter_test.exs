@@ -26,13 +26,40 @@ defmodule SymphonyElixir.ConfigFilterTest do
       {:ok, command} = ConfigFilter.inject_sandbox_config("codex app-server", workspace, source_config_path: source_config)
 
       assert safe_config == Path.join([workspace, ".codex", "config.toml"])
-      assert String.starts_with?(command, "HOME='#{workspace}/.codex' codex app-server")
+      assert String.starts_with?(command, "HOME='#{workspace}' codex app-server")
       assert File.exists?(safe_config)
 
       filtered = File.read!(safe_config)
       refute String.contains?(filtered, "hooks.state")
       assert String.contains?(filtered, "model = \"gpt-5.3-codex-spark\"")
       assert String.contains?(filtered, "shell_environment_policy = \"inherit=all\"")
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "config filter links host auth into the sandboxed codex home" do
+    workspace =
+      Path.join(System.tmp_dir!(), "symphony-elixir-config-filter-auth-#{System.unique_integer([:positive])}")
+
+    source_config = Path.join(workspace, "source.toml")
+    source_auth = Path.join(workspace, "host-auth.json")
+    safe_auth = Path.join([workspace, ".codex", "auth.json"])
+
+    try do
+      File.mkdir_p!(workspace)
+      File.write!(source_config, ~s(model = "gpt-5.5"\n))
+      File.write!(source_auth, ~s({"fake":"auth"}))
+
+      {:ok, command} =
+        ConfigFilter.inject_sandbox_config("codex app-server", workspace,
+          source_config_path: source_config,
+          source_auth_path: source_auth
+        )
+
+      assert String.starts_with?(command, "HOME='#{workspace}' codex app-server")
+      assert File.lstat!(safe_auth).type == :symlink
+      assert File.read_link!(safe_auth) == source_auth
     after
       File.rm_rf(workspace)
     end

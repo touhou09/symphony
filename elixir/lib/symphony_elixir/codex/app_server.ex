@@ -434,19 +434,25 @@ defmodule SymphonyElixir.Codex.AppServer do
       {:error, _reason} ->
         log_non_json_stream_line(payload_string, "turn stream")
 
-        if protocol_message_candidate?(payload_string) do
-          emit_message(
-            on_message,
-            :malformed,
-            %{
-              payload: payload_string,
-              raw: payload_string
-            },
-            metadata_from_message(port, %{raw: payload_string})
-          )
-        end
+        case stream_runtime_blocker(payload_string) do
+          nil ->
+            if protocol_message_candidate?(payload_string) do
+              emit_message(
+                on_message,
+                :malformed,
+                %{
+                  payload: payload_string,
+                  raw: payload_string
+                },
+                metadata_from_message(port, %{raw: payload_string})
+              )
+            end
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+            receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+
+          blocker ->
+            {:error, {:runtime_blocker, blocker}}
+        end
     end
   end
 
@@ -971,7 +977,11 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       {:error, _} ->
         log_non_json_stream_line(payload, "response stream")
-        with_timeout_response(port, request_id, timeout_ms, "")
+
+        case stream_runtime_blocker(payload) do
+          nil -> with_timeout_response(port, request_id, timeout_ms, "")
+          blocker -> {:error, {:runtime_blocker, blocker}}
+        end
     end
   end
 
@@ -996,6 +1006,17 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> to_string()
     |> String.trim_leading()
     |> String.starts_with?("{")
+  end
+
+  defp stream_runtime_blocker(data) do
+    normalized =
+      data
+      |> to_string()
+      |> String.downcase()
+
+    if String.contains?(normalized, "401 unauthorized") and String.contains?(normalized, "responses") do
+      "codex authentication failed: HTTP 401 Unauthorized from Responses API"
+    end
   end
 
   defp issue_context(%{id: issue_id, identifier: identifier}) do

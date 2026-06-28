@@ -2,19 +2,23 @@ defmodule SymphonyElixir.Codex.ConfigFilter do
   @moduledoc false
 
   @safe_config_subpath [".codex", "config.toml"]
+  @safe_auth_subpath [".codex", "auth.json"]
   @host_config_path "/run/symphony/codex-host/config.toml"
+  @host_auth_path "/root/.codex/auth.json"
 
   @spec inject_sandbox_config(String.t(), Path.t(), keyword()) ::
           {:ok, String.t()} | {:error, term()}
   def inject_sandbox_config(codex_command, workspace, opts \\ [])
       when is_binary(codex_command) and is_binary(workspace) do
     source_config_path = Keyword.get(opts, :source_config_path, @host_config_path)
+    source_auth_path = Keyword.get(opts, :source_auth_path, @host_auth_path)
 
     if File.regular?(source_config_path) do
       with {:ok, safe_config_path} <- safe_config_path(workspace),
            :ok <- write_sanitized_config(source_config_path, safe_config_path),
+           :ok <- link_host_auth(source_auth_path, safe_auth_path(workspace)),
            true <- String.trim(safe_config_path) != "" do
-        {:ok, append_config_arg(codex_command, safe_config_path)}
+        {:ok, append_config_arg(codex_command, workspace)}
       else
         {:error, reason} -> {:error, {:safe_config_generation_failed, reason}}
         false -> {:error, {:invalid_safe_config_path, workspace}}
@@ -54,12 +58,38 @@ defmodule SymphonyElixir.Codex.ConfigFilter do
     {:ok, safe_config_path}
   end
 
-  defp append_config_arg(codex_command, safe_config_path)
-       when is_binary(codex_command) and is_binary(safe_config_path) do
+  defp safe_auth_path(workspace) when is_binary(workspace) do
+    Path.join([workspace | @safe_auth_subpath])
+  end
+
+  defp link_host_auth(source_auth_path, safe_auth_path) when is_binary(source_auth_path) and is_binary(safe_auth_path) do
+    if File.regular?(source_auth_path) do
+      with :ok <- File.mkdir_p(Path.dirname(safe_auth_path)),
+           :ok <- remove_existing_auth_link(safe_auth_path),
+           :ok <- File.ln_s(source_auth_path, safe_auth_path) do
+        :ok
+      else
+        {:error, reason} -> {:error, {:auth_link_failed, reason}}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp remove_existing_auth_link(path) when is_binary(path) do
+    case File.rm(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp append_config_arg(codex_command, home_path)
+       when is_binary(codex_command) and is_binary(home_path) do
     if String.starts_with?(String.trim(codex_command), "HOME=") do
       codex_command
     else
-      "HOME=#{shell_quote(Path.dirname(safe_config_path))} #{codex_command}"
+      "HOME=#{shell_quote(home_path)} #{codex_command}"
     end
   end
 

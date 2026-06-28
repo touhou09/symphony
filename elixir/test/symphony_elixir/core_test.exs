@@ -1530,6 +1530,80 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "squad codex authentication failures block instead of retrying as role failures" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-squad-auth-blocker-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-auth"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-auth"}}}'
+            ;;
+          4)
+            printf '%s\\n' 'failed to connect to websocket: HTTP error: 401 Unauthorized, url: wss://api.openai.com/v1/responses'
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        source_repo: template_repo,
+        hook_after_create: "git init -q",
+        codex_command: "#{codex_binary} app-server",
+        squad_enabled: true
+      )
+
+      issue = %Issue{
+        id: "issue-squad-auth",
+        identifier: "MT-SQUAD-AUTH",
+        title: "Block Codex auth failure",
+        description: "Codex cannot authenticate",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-SQUAD-AUTH",
+        labels: []
+      }
+
+      assert {:runtime_blocker, message} = catch_exit(AgentRunner.run(issue))
+      assert message == "codex authentication failed: HTTP 401 Unauthorized from Responses API"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner forwards timestamped codex updates to recipient" do
     test_root =
       Path.join(
