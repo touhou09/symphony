@@ -1477,6 +1477,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp runtime_blocker_type(error) when is_binary(error) do
     cond do
+      String.contains?(error, "codex authentication failed") -> "codex authentication"
       String.contains?(error, "squad evidence contract failed") -> "squad evidence contract"
       String.contains?(error, "no-diff token limit") -> "no-diff token limit"
       true -> "runtime blocker"
