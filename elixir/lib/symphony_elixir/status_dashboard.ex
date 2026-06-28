@@ -359,6 +359,8 @@ defmodule SymphonyElixir.StatusDashboard do
            colorize("│ Throughput: ", @ansi_bold) <> colorize("#{format_tps(tps)} tps", @ansi_cyan),
            colorize("│ Runtime: ", @ansi_bold) <>
              colorize(format_runtime_seconds(codex_seconds_running), @ansi_magenta),
+           colorize("│ Codex auth: ", @ansi_bold) <>
+             colorize(format_auth_state(snapshot), @ansi_cyan),
            colorize("│ Tokens: ", @ansi_bold) <>
              colorize("in #{format_count(codex_input_tokens)}", @ansi_yellow) <>
              colorize(" | ", @ansi_gray) <>
@@ -789,6 +791,12 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp format_count(value), do: to_string(value)
+
+  defp format_auth_state(%{codex_auth: codex_auth}) when is_binary(codex_auth) do
+    codex_auth
+  end
+
+  defp format_auth_state(_snapshot), do: "unknown"
 
   defp running_table_header_row(running_event_width) do
     header =

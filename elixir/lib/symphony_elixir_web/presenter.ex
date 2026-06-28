@@ -18,6 +18,10 @@ defmodule SymphonyElixirWeb.Presenter do
             retrying: length(snapshot.retrying),
             blocked: length(Map.get(snapshot, :blocked, []))
           },
+          codex_auth: snapshot.codex_auth,
+          codex_auth_checked_at: iso8601(snapshot.codex_auth_checked_at),
+          codex_auth_modified_at: iso8601_ms(snapshot.codex_auth_modified_at_ms),
+          codex_auth_unauthorized_seen_at: iso8601_ms(snapshot.codex_auth_unauthorized_seen_ms),
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
@@ -256,6 +260,17 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp due_at_iso8601(_due_in_ms), do: nil
+
+  defp iso8601_ms(nil), do: nil
+
+  defp iso8601_ms(timestamp_ms) when is_integer(timestamp_ms) do
+    case DateTime.from_unix(timestamp_ms, :millisecond) do
+      {:ok, datetime} -> iso8601(datetime)
+      _ -> nil
+    end
+  end
+
+  defp iso8601_ms(_timestamp_ms), do: nil
 
   defp iso8601(%DateTime{} = datetime) do
     datetime

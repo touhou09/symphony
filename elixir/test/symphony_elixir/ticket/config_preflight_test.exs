@@ -298,6 +298,67 @@ defmodule SymphonyElixir.Ticket.ConfigPreflightTest do
     assert :ok = Orchestrator.preflight_issue_for_dispatch_for_test(issue)
   end
 
+  test "preflight blocks when Codex auth is missing" do
+    write_workflow_file!(Workflow.workflow_file_path(), codex_max_no_diff_tokens: 0)
+
+    issue = %Issue{
+      id: "10004",
+      identifier: "SYM-13",
+      title: "Missing auth",
+      state: "Todo",
+      description: nil
+    }
+
+    assert {
+             :error,
+             {:runtime_blocker, "codex auth status: missing"}
+           } = Orchestrator.preflight_issue_for_dispatch_for_test(issue, :missing)
+  end
+
+  test "preflight blocks when Codex auth is malformed" do
+    write_workflow_file!(Workflow.workflow_file_path(), codex_max_no_diff_tokens: 0)
+
+    issue = %Issue{id: "10005", identifier: "SYM-14", title: "Malformed auth", state: "Todo", description: nil}
+
+    assert {
+             :error,
+             {:runtime_blocker, "codex auth status: malformed"}
+           } = Orchestrator.preflight_issue_for_dispatch_for_test(issue, :malformed)
+  end
+
+  test "preflight blocks when Codex auth is stale" do
+    write_workflow_file!(Workflow.workflow_file_path(), codex_max_no_diff_tokens: 0)
+
+    issue = %Issue{id: "10006", identifier: "SYM-15", title: "Stale auth", state: "Todo", description: nil}
+
+    assert {
+             :error,
+             {:runtime_blocker, "codex auth status: stale"}
+           } = Orchestrator.preflight_issue_for_dispatch_for_test(issue, :stale)
+  end
+
+  test "preflight blocks when Codex auth is unauthorized" do
+    write_workflow_file!(Workflow.workflow_file_path(), codex_max_no_diff_tokens: 0)
+
+    issue = %Issue{id: "10007", identifier: "SYM-16", title: "Unauthorized auth", state: "Todo", description: nil}
+
+    assert {
+             :error,
+             {:runtime_blocker, "codex auth status: unauthorized"}
+           } = Orchestrator.preflight_issue_for_dispatch_for_test(issue, :unauthorized)
+  end
+
+  test "preflight blocks when Codex auth is unknown" do
+    write_workflow_file!(Workflow.workflow_file_path(), codex_max_no_diff_tokens: 0)
+
+    issue = %Issue{id: "10008", identifier: "SYM-17", title: "Unknown auth", state: "Todo", description: nil}
+
+    assert {
+             :error,
+             {:runtime_blocker, "codex auth status: unknown"}
+           } = Orchestrator.preflight_issue_for_dispatch_for_test(issue, :unknown)
+  end
+
   defp write_codex_auth_json!(opts) do
     auth_path =
       Path.join(System.tmp_dir!(), "symphony-codex-auth-#{System.unique_integer([:positive])}.json")

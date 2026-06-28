@@ -1,5 +1,73 @@
 ## Scope
 
+- Add Codex auth keeper behavior that classifies mounted auth state without exposing token values.
+- Surface `codex_auth=ok|missing|malformed|stale|unauthorized|unknown` through the observability API and dashboard presenter.
+- Prevent new Codex dispatches when auth is not usable, without burning model tokens or retrying in a tight loop.
+- Ensure successful auth refresh clears stale `codex-authentication` blockers so previously blocked work can redispatch.
+- Provide an operator runbook for refreshing host Codex login and restarting the orchestrator, with non-secret verification commands.
+- Handle Codex app-server auth refresh requests explicitly: support them only if the local app-server exposes a bounded refresh path; otherwise reject immediately with a clear non-spinning status.
+- Keep OpenAI credentials out of Symphony storage, logs, dashboard payloads, tracker comments, and evidence.
+
+## CTO Plan
+
+- Role: cto
+- Model: gpt-5.5
+- Status taxonomy:
+  - `ok`: auth file exists, parses as expected, is fresh enough by local policy, and has not recently produced a Codex unauthorized signal.
+  - `missing`: configured/mounted `auth.json` path is absent or unreadable.
+  - `malformed`: file is present but cannot be parsed as valid JSON or lacks the minimum non-secret structure required by Codex.
+  - `stale`: file parses but is older than the configured freshness threshold or otherwise fails a deterministic age/freshness check.
+  - `unauthorized`: recent Codex preflight/app-server result indicates 401/revoked credentials.
+  - `unknown`: auth cannot be assessed due to unsupported path/config/runtime uncertainty; do not treat as `ok` for unattended dispatch unless existing behavior already did.
+- Implementation boundaries:
+  - Prefer a dedicated `SymphonyElixir.Codex.AuthKeeper` module with pure status classification and a small runtime state adapter for unauthorized observations.
+  - Keep all status payloads secret-free: expose enum, non-secret reason category, checked timestamp, auth path presence boolean if already non-sensitive, and freshness metadata only if it cannot identify token material.
+  - Wire auth status into observability snapshots, API JSON, dashboard text/presenter, and dispatch preflight.
+  - Dispatch gate should block only new Codex starts when status is `missing`, `malformed`, `stale`, `unauthorized`, or unsafe `unknown`; it must record/update a non-secret blocker and back off via existing queue/blocker mechanisms.
+  - On transition back to `ok`, clear or ignore stale `codex-authentication` blockers so redispatch is possible.
+  - For auth refresh requests, inspect `Codex.AppServer`; if no supported app-server refresh endpoint exists, return a bounded rejection such as `{:error, :unsupported}` and display that state rather than polling/spinning.
+  - Update operator docs/runbook only with host commands that refresh login interactively outside Symphony and restart/verify orchestrator state; do not automate browser login.
+- Reproduction signals required before implementation:
+  - Current observability/dashboard output lacks `codex_auth` status.
+  - Current auth preflight behavior does not distinguish all requested states and/or does not prove stale blockers clear after refresh.
+- Validation criteria for implementer/verifiers:
+  - Add focused auth keeper tests for `ok`, `missing`, `malformed`, `stale`, `unauthorized`, and `unknown` where applicable.
+  - Add dispatch/preflight regression proving stale/bad auth blocks before Codex app-server starts and does not tight-loop retries.
+  - Add recovery regression proving an auth status transition to `ok` removes or bypasses old `codex-authentication` blockers and allows redispatch.
+  - Add observability API/dashboard presenter tests proving `codex_auth` enum appears and token-like fields do not.
+  - Add runbook validation by checking documented commands are exact, non-secret, and include verification of both API/dashboard status and a formerly blocked ticket.
+  - Run targeted auth preflight tests, dashboard presenter/API tests, `mix format --check-formatted`, and `mix squad.check --file ../docs/codex-squad-evidence.md --workflow WORKFLOW.md` after verifier PASS rows are present.
+
+### CTO Notes
+
+- 2026-06-28T00:00:00Z CTO initialized SYM-33 evidence. Implementation should stay bounded to auth status plumbing, dispatch gating/recovery, app-server refresh behavior, and runbook docs.
+- 2026-06-28T10:10:51Z CTO role turn 1/4 resumed in `/var/lib/symphony/workspaces/SYM-33` at `22b24b5`; refreshed scope boundaries before tracker/workpad updates.
+- 2026-06-28T10:12:09Z CTO role turn 1/4 checkpoint:
+  - Pull skill sync: enabled rerere, fetched `origin`, fast-forward checked `origin/dev`, and remained at `22b24b5`; `origin/main` is not available in this workspace, so no `origin/main` merge was possible.
+  - PR routing check: local `gh` is unavailable and the exposed GitHub connector tools require a known PR number; no branch-to-PR lookup capability is available in-session.
+  - Reproduction confirmed: `codex_auth` remains absent from app/test/docs surfaces; `preflight_issue_for_dispatch/1` only chains ticket content validation and runtime blocker comments; `Codex.AppServer.stream_runtime_blocker/1` recognizes `401 Unauthorized` only after app-server stream output.
+  - Validation attempt: `MIX_ENV=test mix test test/symphony_elixir/ticket/config_preflight_test.exs test/symphony_elixir/extensions_test.exs` failed before tests because Hex/dependency `:bandit` is unavailable locally; installing Hex would write outside the provided repository copy.
+- Live refresh validation may require existing host Codex auth; if unavailable, record the blocker in the workpad and provide deterministic local stale/malformed/unauthorized simulations instead of fabricating live evidence.
+- Reproduction signal:
+  - `rg -n "codex_auth" elixir/lib elixir/test elixir/docs SPEC.md README.md` returned no matches, so the current API/dashboard/test surface does not expose the required `codex_auth` status.
+  - Current `Orchestrator.preflight_issue_for_dispatch/1` only chains ticket content validation and runtime blocker comment inspection; it does not classify mounted Codex auth before dispatch.
+  - Current `Codex.AppServer.stream_runtime_blocker/1` maps `401 Unauthorized` output to a generic `codex authentication failed` blocker after Codex has already started.
+  - Current `StatusDashboard.humanize_codex_method/2` renders `account/chatgptAuthTokens/refresh` as an event, but no bounded refresh handling path was found in the inspected API/controller surface.
+- Pull skill evidence:
+  - Merge sources attempted: current branch `dev`, `origin/dev`, and `origin/main`.
+  - Result: `git pull --ff-only origin dev` was clean/already up to date; `git -c merge.conflictstyle=zdiff3 merge origin/main` failed because only `origin/dev` exists locally (`origin/main - not something we can merge`).
+  - Resulting HEAD: `22b24b5`.
+- CTO validation attempt:
+  - `cd elixir && mix test test/symphony_elixir/ticket/config_preflight_test.exs test/symphony_elixir/extensions_test.exs` did not run because Mix prompted to install Hex and dependency `:bandit` is unavailable locally.
+- 2026-06-28T10:04:57Z CTO refresh:
+  - Confirmed issue SYM-33 is in `진행 중` and no active `## Codex Workpad` comment exists yet.
+  - Re-ran reproduction search: `codex_auth` is still absent from `elixir/lib`, `elixir/test`, `elixir/docs`, `README.md`, and `SPEC.md`; auth failures are currently observed only after Codex startup via `401 Unauthorized` parsing in `Codex.AppServer`.
+  - Pull skill sync: fetched `origin`; current branch is `dev` at `22b24b5`; `origin/dev` exists at `22b24b5`; `origin/main` is not present, so no `origin/main` merge can be performed in this workspace. Working tree remains intentionally dirty with this evidence update.
+
+---
+
+## Scope
+
 - Add a bounded, deterministic Jira candidate dispatch path so the orchestrator starts no more than the configured number of active issue runs at once.
 - Keep eligible candidates waiting in existing priority/created ordering until an active issue releases a slot by reaching terminal, canceled, blocked, or stale-cleaned state.
 - Add a conservative local Compose default for the active issue limit and make it configurable without changing role prompts or GitHub PR publication semantics.
@@ -115,6 +183,76 @@
 - 2026-06-27T16:27:42Z final_verifier (gpt-5.5): push-gate review found `make all` was executing tests under the caller's `MIX_ENV=dev`, which hid test-only helpers/dependencies and failed coverage. Fixed `elixir/Makefile` so `test` and `coverage` run with `MIX_ENV=test`, added the missing `State.t()` type for Dialyzer, and reran the full gate.
 - Final verifier full-gate validation:
   - `MIX_ENV=dev make all` -> pass (`331 tests, 0 failures, 2 skipped`; coverage total `85.96%`; Dialyzer `passed successfully`)
+
+## Implementation (SYM-33 - implementer turn 2/4)
+
+- Role: implementer
+- Model: gpt-5.3-codex-spark
+- First edit path (verified): `elixir/lib/symphony_elixir/codex/auth_keeper.ex`
+- Result:
+  - Added `SymphonyElixir.Codex.AuthKeeper` with non-secret status states: `ok`, `missing`, `malformed`, `stale`, `unauthorized`, `unknown`.
+  - Wired auth status and freshness metadata into orchestrator preflight gating and runtime recovery (`orchestrator.ex`).
+  - Added deterministic auth refresh rejection in Codex app-server for unsupported `account/chatgptAuthTokens/refresh` path with JSON-RPC error `-32601`.
+  - Exposed `codex_auth*` fields in state API/presenter and dashboard (`presenter.ex`, `dashboard_live.ex`, `status_dashboard.ex`) without including token values.
+  - Added runbook guidance in `elixir/README.md` with host login refresh + orchestrator restart + verification commands.
+  - Added/updated tests:
+    - `elixir/test/symphony_elixir/codex/auth_keeper_test.exs` (status/state matrix + reason rendering).
+    - `elixir/test/symphony_elixir/orchestrator_status_test.exs` (blocked redispatch clear path when auth recovers to `ok`).
+    - `elixir/test/symphony_elixir/app_server_test.exs` (unsupported refresh rejection).
+    - `elixir/test/symphony_elixir/ticket/config_preflight_test.exs` and `extensions_test.exs` assertions extended for auth status fields.
+- 2026-06-28T18:31:22Z Validation and evidence attempts:
+  - `cd elixir && mix format --check-formatted` -> pass
+  - `cd elixir && mix test test/symphony_elixir/ticket/config_preflight_test.exs test/symphony_elixir/extensions_test.exs test/symphony_elixir/app_server_test.exs test/symphony_elixir/orchestrator_status_test.exs test/symphony_elixir/codex/auth_keeper_test.exs` -> blocked by environment (`Could not find an SCM for dependency :bandit from SymphonyElixir.MixProject`; Hex not installed).
+  - `cd elixir && mix squad.check --file ../docs/codex-squad-evidence.md --workflow WORKFLOW.md` -> blocked by same environment dependency issue.
+
+## Verification
+
+- 2026-06-28T18:31:22Z verifier (gpt-5.4): `FAIL` (test evidence missing because local Elixir dependency bootstrapping is blocked by `:bandit` SCM resolution in this workspace).
+- 2026-06-28T18:31:22Z final_verifier (gpt-5.5): `FAIL` (verification cannot be finalized while required test/squad checks are blocked by missing local dependency/bootstrap state).
+- 2026-06-28T10:47:00Z verifier note: resumed fresh-context verification for SYM-33 after implementation landed; reviewing auth status plumbing, secret exposure surfaces, and whether this workspace can satisfy the required validation gates without external bootstrap writes.
+- 2026-06-28T10:49:00Z verifier note: cleared the prior local bootstrap blocker by installing repo-local Hex/Rebar (`HEX_HOME=$PWD/.hex MIX_HOME=$PWD/.mix`) and running `mix deps.get` successfully inside `elixir/`; verification is now based on runnable local checks rather than missing tooling.
+- Verifier findings:
+  - `FAIL`: the current auth recovery implementation does not compile. `clear_authorization_blocked_issue/2` uses `is_codex_auth_blocked_error?/1` inside a guard (`when is_binary(error) and is_codex_auth_blocked_error?(error)`), but local functions are not allowed in guards, so `mix test` stops at compile time before any auth tests run. Evidence: [orchestrator.ex](/var/lib/symphony/workspaces/SYM-33/elixir/lib/symphony_elixir/orchestrator.ex:579).
+  - Validation run:
+    - `HEX_HOME=$PWD/.hex MIX_HOME=$PWD/.mix MIX_ENV=test mix deps.get` -> pass
+    - `HEX_HOME=$PWD/.hex MIX_HOME=$PWD/.mix MIX_ENV=test mix format --check-formatted` -> pass
+    - `HEX_HOME=$PWD/.hex MIX_HOME=$PWD/.mix MIX_ENV=test mix test test/symphony_elixir/ticket/config_preflight_test.exs test/symphony_elixir/extensions_test.exs test/symphony_elixir/app_server_test.exs test/symphony_elixir/orchestrator_status_test.exs test/symphony_elixir/codex/auth_keeper_test.exs` -> fail at compile time with `cannot find or invoke local is_codex_auth_blocked_error?/1 inside a guard`
+    - `HEX_HOME=$PWD/.hex MIX_HOME=$PWD/.mix MIX_ENV=test mix squad.check --file ../docs/codex-squad-evidence.md --workflow WORKFLOW.md` -> not run because the target test gate is red at compile time
+- [ ] verifier (gpt-5.4): FAIL
+- 2026-06-28T10:55:00Z final_verifier note: starting final verification for SYM-33 after verifier compile failure; will inspect the diff, fix only verifier-blocking defects if needed, rerun targeted validation and `mix squad.check`, then record the required PASS/FAIL row.
+- 2026-06-28T11:05:00Z final_verifier (gpt-5.5): addressed verifier-blocking implementation defects found by runnable tests:
+  - Removed invalid local-function guard usage in `clear_authorization_blocked_issue/2`.
+  - Fixed default preflight helper to use an `:ok` auth state instead of passing an atom to a `%State{}`-only private function.
+  - Made presenter auth timestamp projection nil-safe for dashboard/API boot.
+  - Classified non-regular auth paths as `unknown`.
+  - Fixed auth-blocker clearing so only codex-auth blockers are released and unrelated runtime blockers keep their claims.
+  - Updated the auth recovery fixture to use a valid `max_concurrent_agents` value under current config validation.
+- Final verifier validation:
+  - `HEX_HOME=$PWD/.hex MIX_HOME=$PWD/.mix MIX_ENV=test mix format --check-formatted` -> pass
+  - `HEX_HOME=$PWD/.hex MIX_HOME=$PWD/.mix MIX_ENV=test mix test test/symphony_elixir/ticket/config_preflight_test.exs test/symphony_elixir/extensions_test.exs test/symphony_elixir/app_server_test.exs test/symphony_elixir/orchestrator_status_test.exs test/symphony_elixir/codex/auth_keeper_test.exs` -> pass (`98 tests, 0 failures`)
+  - `git diff --check` -> pass
+  - `HEX_HOME=$PWD/.hex MIX_HOME=$PWD/.mix MIX_ENV=test mix squad.check --file ../docs/codex-squad-evidence.md --workflow WORKFLOW.md` -> pass (`squad.check: evidence contract OK`)
+- Secret exposure review:
+  - Observability/dashboard fields expose only `codex_auth`, checked timestamp, modified timestamp, and unauthorized-seen timestamp.
+  - Runbook commands inspect file metadata and API status only; they do not print auth file contents or token values.
+  - Diff scan found no runtime exposure of OpenAI credential values; the only `access_token` string is a synthetic test fixture.
+- Push-gate validation:
+  - `MIX_ENV=test make -C elixir all` initially reached coverage and exposed stale terminal dashboard snapshots after adding the `Codex auth` status line.
+  - `UPDATE_SNAPSHOTS=1 MIX_ENV=test mix test test/symphony_elixir/status_dashboard_snapshot_test.exs` -> pass (`6 tests, 0 failures`) and updated the expected dashboard snapshots.
+  - `HEX_HOME=$PWD/.hex MIX_HOME=$PWD/.mix MIX_ENV=test make all` -> build, format, lint, squad-check, and coverage pass (`359 tests, 0 failures, 2 skipped`, coverage total `85.33%`), then fails at the `dialyzer` Make target because `dialyxir` is declared `only: [:dev]` and is not available under `MIX_ENV=test`.
+  - `HEX_HOME=$PWD/.hex MIX_HOME=$PWD/.mix MIX_ENV=dev mix dialyzer --format short` -> blocked by environment resource limit; process exited `137` after PLT setup.
+- CI feedback remediation:
+  - PR #28 first `make-all` run failed during coverage at `auth recovery clears blocked codex-auth issue when auth status is ok`; CI uses `max_cases: 8`, and the test used a fixed sleep before inspecting internal state.
+  - Replaced the fixed sleep with a bounded internal-state wait for `codex_auth_status == :ok`, empty `blocked`, and empty `claimed`.
+  - `HEX_HOME=$PWD/.hex MIX_HOME=$PWD/.mix MIX_ENV=test mix test test/symphony_elixir/orchestrator_status_test.exs:152 --max-cases 8` -> pass (`1 test, 0 failures`)
+  - `HEX_HOME=$PWD/.hex MIX_HOME=$PWD/.mix MIX_ENV=test mix test --cover --max-cases 8` -> pass (`359 tests, 0 failures, 2 skipped`, coverage total `85.33%`)
+  - PR #28 second `make-all` run passed coverage, then failed in Dialyzer with `lib/symphony_elixir/orchestrator.ex:596:8:pattern_match_cov` for an unreachable catch-all `codex_auth_blocked_error?/1` clause.
+  - Removed the unreachable catch-all; all call sites already pass binary errors.
+  - `HEX_HOME=$PWD/.hex MIX_HOME=$PWD/.mix MIX_ENV=test mix test --cover --max-cases 8` -> pass (`359 tests, 0 failures, 2 skipped`, coverage total `85.33%`)
+  - Local `HEX_HOME=$PWD/.hex MIX_HOME=$PWD/.mix MIX_ENV=dev mix dialyzer --format short` remains blocked by container resource limit (`137`) after PLT work; GitHub Actions is the authoritative Dialyzer rerun for this fix.
+  - PR #28 final head `e9f22f5`: GitHub Actions `make-all` -> success; `pr-description-lint` -> success; PR comments -> none.
+- [x] verifier (gpt-5.4): PASS
+- [x] final_verifier (gpt-5.5): PASS
 
 ---
 

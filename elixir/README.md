@@ -140,6 +140,30 @@ Rollback/manual recovery:
 - If the deploy path becomes unavailable, recover on the Mac host by running:
   `cd <repo> && docker compose down --remove-orphans && docker compose up -d --build --no-deps orchestrator`
 
+### Codex auth refresh runbook (non-interactive)
+
+When `orchestrator` blocks new dispatches with `codex_auth=missing|malformed|stale|unauthorized|unknown`:
+
+- Find which auth file is mounted and check freshness:
+  - `docker compose exec orchestrator sh -lc 'ls -l /root/.codex/auth.json && stat -c \"%n %Y %s\" /root/.codex/auth.json'`
+- Confirm orchestrator observability state:
+  - `curl -sS http://localhost:4000/api/v1/state | jq '{codex_auth, codex_auth_checked_at, codex_auth_modified_at, codex_auth_unauthorized_seen_at}'`
+- Identify currently blocked tickets and restart blocker reason:
+  - `curl -sS http://localhost:4000/api/v1/state | jq '.blocked[] | {issue_identifier, error, blocked_at}'`
+- In host shell, refresh Codex login by running Codex auth flow for the host-mounted account:
+  - `codex auth login`
+  - Optional verification: `codex auth list`
+- Restart orchestrator to force a fresh auth read and status refresh:
+  - `docker compose restart orchestrator`
+  - `docker compose logs -f orchestrator` (watch for `codex_auth=ok`)
+- Verify the formerly blocked ticket can re-enter dispatch:
+  - `curl -sS http://localhost:4000/api/v1/state | jq '.blocked[] | {issue_identifier, error}'` should no longer include the previously blocked ticket
+  - `curl -sS http://localhost:4000/api/v1/state | jq '.running, .queued'` should reflect active processing when candidate issues are available
+
+Notes:
+- This flow is non-secret and does not read tokens from orchestrator state, logs, comments, or JSON payloads.
+- Do not persist or print auth token values in operator runbooks or issue comments.
+
 ## Codex squad mode
 
 `agent.model_roles` describes the Codex model split used by squad mode:
